@@ -1,6 +1,9 @@
 package metrics
 
 import (
+	"context"
+	"log/slog"
+	"sync/atomic"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -42,6 +45,16 @@ type Metrics struct {
 	skipped            *prometheus.CounterVec
 	affectedPortfolios *prometheus.SummaryVec
 	affectedUsers      *prometheus.SummaryVec
+
+	// lightweight per-minute counters for console dump
+	consumedTotal atomic.Int64
+	failedTotal   atomic.Int64
+	skippedTotal  atomic.Int64
+
+	listenerDurationSum atomic.Int64
+	listenerDurationCnt atomic.Int64
+	serviceDurationSum  atomic.Int64
+	serviceDurationCnt  atomic.Int64
 }
 
 func New(reg *prometheus.Registry) *Metrics {
@@ -82,16 +95,63 @@ func New(reg *prometheus.Registry) *Metrics {
 	return m
 }
 
+func (m *Metrics) RunPeriodicDump(ctx context.Context) {
+	ticker := time.NewTicker(1 * time.Minute)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			m.dump()
+		}
+	}
+}
+
+func (m *Metrics) dump() {
+	consumed := m.consumedTotal.Swap(0)
+	failed := m.failedTotal.Swap(0)
+	skipped := m.skippedTotal.Swap(0)
+	lSum := m.listenerDurationSum.Swap(0)
+	lCnt := m.listenerDurationCnt.Swap(0)
+	sSum := m.serviceDurationSum.Swap(0)
+	sCnt := m.serviceDurationCnt.Swap(0)
+
+	avgListener := 0.0
+	if lCnt > 0 {
+		avgListener = float64(lSum) / float64(lCnt) / 1e9
+	}
+	avgService := 0.0
+	if sCnt > 0 {
+		avgService = float64(sSum) / float64(sCnt) / 1e9
+	}
+
+	slog.Info("throughput stats",
+		"consumed_per_min", consumed,
+		"consumed_per_sec", float64(consumed)/60.0,
+		"failed_per_min", failed,
+		"skipped_per_min", skipped,
+		"avg_listener_sec", avgListener,
+		"avg_service_sec", avgService,
+	)
+}
+
 func (m *Metrics) ObserveListener(event, result string, start time.Time) {
 	seconds := time.Since(start).Seconds()
 	m.listener.WithLabelValues(event, result).Observe(seconds)
 	m.lastListener.WithLabelValues(event, result).Set(seconds)
+
+	m.listenerDurationSum.Add(time.Since(start).Nanoseconds())
+	m.listenerDurationCnt.Add(1)
 }
 
 func (m *Metrics) ObserveService(op, result string, start time.Time) {
 	seconds := time.Since(start).Seconds()
 	m.service.WithLabelValues(op, result).Observe(seconds)
 	m.lastService.WithLabelValues(op, result).Set(seconds)
+
+	m.serviceDurationSum.Add(time.Since(start).Nanoseconds())
+	m.serviceDurationCnt.Add(1)
 }
 
 func (m *Metrics) ObservePhase(op, phase, result string, start time.Time) {
@@ -121,10 +181,18 @@ func (m *Metrics) RecordAge(event string, age time.Duration) {
 
 func (m *Metrics) RecordConsumed(event, result string) {
 	m.consumed.WithLabelValues(event, result).Inc()
+	m.consumedTotal.Add(1)
+	switch result {
+	case ResultFailure:
+		m.failedTotal.Add(1)
+	case ResultSkipped:
+		m.skippedTotal.Add(1)
+	}
 }
 
 func (m *Metrics) RecordSkipped(event, reason string) {
 	m.skipped.WithLabelValues(event, reason).Inc()
+	m.skippedTotal.Add(1)
 }
 
 func (m *Metrics) RecordAffectedPortfolios(op string, n int) {

@@ -27,6 +27,7 @@ func main() {
 	defer stop()
 	reg := prometheus.NewRegistry()
 	m := metrics.New(reg)
+	go m.RunPeriodicDump(ctx)
 	rdb := newRedisClient(cfg)
 	store := redisstore.New(rdb, m)
 	profit := service.NewProfitService(store, m)
