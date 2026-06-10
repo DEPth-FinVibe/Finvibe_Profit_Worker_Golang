@@ -142,6 +142,10 @@ func (s *Store) BulkSetStockCurrentValues(ctx context.Context, updates map[strin
 	return err
 }
 func (s *Store) BulkIncrementPortfolioCurrentValuesAndFetchMetadata(ctx context.Context, deltas map[int64]decimal.Decimal) (map[int64]model.PortfolioStateSnapshot, error) {
+	opStart := time.Now()
+	opResult := metrics.ResultFailure
+	defer func() { s.observeOperation(metrics.OpPortfolioCurrent, opResult, opStart) }()
+
 	pipe := s.rdb.Pipeline()
 	ids := make([]int64, 0, len(deltas))
 	incr := make([]*redis.FloatCmd, 0, len(deltas))
@@ -165,9 +169,14 @@ func (s *Store) BulkIncrementPortfolioCurrentValuesAndFetchMetadata(ctx context.
 		vals := meta[i].Val()
 		out[id] = model.PortfolioStateSnapshot{CurrentValue: decimal.NewFromFloat(incr[i].Val()), Metadata: model.PortfolioMetadata{PurchasedValue: asInt(vals, 0), AssetCount: asInt(vals, 1), UserID: asString(vals, 2), CurrentValue: decimal.NewFromFloat(incr[i].Val())}}
 	}
+	opResult = metrics.ResultSuccess
 	return out, nil
 }
 func (s *Store) BulkIncrementUserCurrentValuesAndFetchMetadata(ctx context.Context, deltas map[string]decimal.Decimal) (map[string]model.UserStateSnapshot, error) {
+	opStart := time.Now()
+	opResult := metrics.ResultFailure
+	defer func() { s.observeOperation(metrics.OpUserCurrent, opResult, opStart) }()
+
 	pipe := s.rdb.Pipeline()
 	ids := make([]string, 0, len(deltas))
 	incr := make([]*redis.FloatCmd, 0, len(deltas))
@@ -191,6 +200,7 @@ func (s *Store) BulkIncrementUserCurrentValuesAndFetchMetadata(ctx context.Conte
 		vals := meta[i].Val()
 		out[id] = model.UserStateSnapshot{CurrentValue: decimal.NewFromFloat(incr[i].Val()), Metadata: model.UserMetadata{PurchasedValue: asInt(vals, 0), PortfolioCount: asInt(vals, 1)}}
 	}
+	opResult = metrics.ResultSuccess
 	return out, nil
 }
 
@@ -263,6 +273,8 @@ func (s *Store) FindPortfolioPurchasedValue(ctx context.Context, id int64) int64
 	return s.hint(ctx, pfKey(id), fPV)
 }
 func (s *Store) FindPortfolioCurrentValue(ctx context.Context, id int64) decimal.Decimal {
+	start := time.Now()
+	defer func() { s.observeOperation(metrics.OpPortfolioCurrent, metrics.ResultSuccess, start) }()
 	return s.hdecFallback(ctx, pfKey(id), fCVP, fCV)
 }
 func (s *Store) FindAssetCount(ctx context.Context, id int64) int64 {
@@ -308,23 +320,30 @@ func (s *Store) FindUserPortfolioCount(ctx context.Context, id string) int64 {
 	return s.hint(ctx, usrKey(id), fPC)
 }
 func (s *Store) FindUserCurrentValue(ctx context.Context, id string) decimal.Decimal {
+	start := time.Now()
+	defer func() { s.observeOperation(metrics.OpUserCurrent, metrics.ResultSuccess, start) }()
 	return s.hdecFallback(ctx, usrKey(id), fCVP, fCV)
 }
 func (s *Store) CalculateUserCurrentValue(ctx context.Context, id string) decimal.Decimal {
-	if v := s.FindUserCurrentValue(ctx, id); !v.IsZero() {
+	start := time.Now()
+	defer func() { s.observeOperation(metrics.OpUserCurrent, metrics.ResultSuccess, start) }()
+	if v := s.hdecFallback(ctx, usrKey(id), fCVP, fCV); !v.IsZero() {
 		return v
 	}
 	members := s.rdb.SMembers(ctx, userPortfoliosKey(id)).Val()
 	total := decimal.Zero
 	for _, m := range members {
 		pid, _ := strconv.ParseInt(m, 10, 64)
-		total = total.Add(s.FindPortfolioCurrentValue(ctx, pid))
+		total = total.Add(s.hdecFallback(ctx, pfKey(pid), fCVP, fCV))
 	}
 	return total
 }
 
 func (s *Store) SavePortfolioValuation(ctx context.Context, v model.PortfolioValuation) error {
-	_, err := s.rdb.TxPipelined(ctx, func(pipe redis.Pipeliner) error {
+	start := time.Now()
+	var err error
+	defer func() { s.observeOperation(metrics.OpPortfolioValuation, resultFromError(err), start) }()
+	_, err = s.rdb.TxPipelined(ctx, func(pipe redis.Pipeliner) error {
 		pipe.HSet(ctx, pfKey(v.PortfolioID), map[string]any{fPV: v.PurchasedValue, fCV: v.CurrentValue, fPR: v.ProfitRate, fAC: v.AssetCount, fDel: "0", fUA: time.Now().UTC().Format(time.RFC3339Nano)})
 		pipe.SAdd(ctx, "dirty:portfolio-valuations", strconv.FormatInt(v.PortfolioID, 10))
 		return nil
@@ -332,7 +351,10 @@ func (s *Store) SavePortfolioValuation(ctx context.Context, v model.PortfolioVal
 	return err
 }
 func (s *Store) SaveUserValuation(ctx context.Context, v model.UserValuation) error {
-	_, err := s.rdb.TxPipelined(ctx, func(pipe redis.Pipeliner) error {
+	start := time.Now()
+	var err error
+	defer func() { s.observeOperation(metrics.OpUserValuation, resultFromError(err), start) }()
+	_, err = s.rdb.TxPipelined(ctx, func(pipe redis.Pipeliner) error {
 		pipe.HSet(ctx, usrKey(v.UserID), map[string]any{fPV: v.PurchasedValue, fCV: v.CurrentValue, fPR: v.ProfitRate, fPC: v.PortfolioCount, fUA: time.Now().UTC().Format(time.RFC3339Nano)})
 		pipe.SAdd(ctx, "dirty:user-valuations", v.UserID)
 		return nil
@@ -340,23 +362,29 @@ func (s *Store) SaveUserValuation(ctx context.Context, v model.UserValuation) er
 	return err
 }
 func (s *Store) BulkSavePortfolioValuations(ctx context.Context, vals []model.PortfolioValuation) error {
+	start := time.Now()
+	var err error
+	defer func() { s.observeOperation(metrics.OpPortfolioValuation, resultFromError(err), start) }()
 	pipe := s.rdb.Pipeline()
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	for _, v := range vals {
 		pipe.HSet(ctx, pfKey(v.PortfolioID), map[string]any{fPV: v.PurchasedValue, fCV: v.CurrentValue, fPR: v.ProfitRate, fAC: v.AssetCount, fDel: "0", fUA: now})
 		pipe.SAdd(ctx, "dirty:portfolio-valuations", strconv.FormatInt(v.PortfolioID, 10))
 	}
-	_, err := pipe.Exec(ctx)
+	_, err = pipe.Exec(ctx)
 	return err
 }
 func (s *Store) BulkSaveUserValuations(ctx context.Context, vals []model.UserValuation) error {
+	start := time.Now()
+	var err error
+	defer func() { s.observeOperation(metrics.OpUserValuation, resultFromError(err), start) }()
 	pipe := s.rdb.Pipeline()
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	for _, v := range vals {
 		pipe.HSet(ctx, usrKey(v.UserID), map[string]any{fPV: v.PurchasedValue, fCV: v.CurrentValue, fPR: v.ProfitRate, fPC: v.PortfolioCount, fUA: now})
 		pipe.SAdd(ctx, "dirty:user-valuations", v.UserID)
 	}
-	_, err := pipe.Exec(ctx)
+	_, err = pipe.Exec(ctx)
 	return err
 }
 func (s *Store) MarkPortfolioValuationDeleted(ctx context.Context, id int64) error {
@@ -401,6 +429,20 @@ func asString(vals []any, i int) string {
 	return fmt.Sprint(vals[i])
 }
 func asInt(vals []any, i int) int64 { n, _ := strconv.ParseInt(asString(vals, i), 10, 64); return n }
+func resultFromError(err error) string {
+	if err != nil && err != redis.Nil {
+		return metrics.ResultFailure
+	}
+	return metrics.ResultSuccess
+}
+
+func (s *Store) observeOperation(operation, result string, start time.Time) {
+	if s.metrics == nil {
+		return
+	}
+	s.metrics.ObserveRedisOperation(operation, result, start)
+}
+
 func (s *Store) observe(cmd string, err error, start time.Time) {
 	if s.metrics == nil {
 		return

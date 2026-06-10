@@ -235,6 +235,9 @@ func (c *Consumers) handlePortfolioUser(ctx context.Context, msgs []message) err
 		default:
 			return fmt.Errorf("unsupported portfolio user event type: %s", ev.EventType)
 		}
+		if !ev.OccurredAt.IsZero() {
+			c.metrics.RecordAge(metrics.EventPortfolioUser, time.Since(ev.OccurredAt))
+		}
 	}
 	if len(reqs) > 0 {
 		if err := c.cache.UpdateUserCaches(ctx, reqs); err != nil {
@@ -245,6 +248,7 @@ func (c *Consumers) handlePortfolioUser(ctx context.Context, msgs []message) err
 	c.recordMany(metrics.EventPortfolioUser, metrics.ResultSuccess, len(reqs))
 	for i := 0; i < skipped; i++ {
 		c.metrics.RecordSkipped(metrics.EventPortfolioUser, metrics.ReasonUpdatedEventIgnored)
+		c.metrics.RecordConsumed(metrics.EventPortfolioUser, metrics.ResultSkipped)
 	}
 	result = metrics.ResultSuccess
 	return nil
