@@ -1,4 +1,4 @@
-profit-worker
+/profit-worker
 /bin/
 *.test
 coverage.out
