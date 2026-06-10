@@ -367,9 +367,14 @@ func (s *Store) BulkSavePortfolioValuations(ctx context.Context, vals []model.Po
 	defer func() { s.observeOperation(metrics.OpPortfolioValuation, resultFromError(err), start) }()
 	pipe := s.rdb.Pipeline()
 	now := time.Now().UTC().Format(time.RFC3339Nano)
+	dirty := make([]any, 0, len(vals))
 	for _, v := range vals {
+		portfolioID := strconv.FormatInt(v.PortfolioID, 10)
 		pipe.HSet(ctx, pfKey(v.PortfolioID), map[string]any{fPV: v.PurchasedValue, fCV: v.CurrentValue, fPR: v.ProfitRate, fAC: v.AssetCount, fDel: "0", fUA: now})
-		pipe.SAdd(ctx, "dirty:portfolio-valuations", strconv.FormatInt(v.PortfolioID, 10))
+		dirty = append(dirty, portfolioID)
+	}
+	if len(dirty) > 0 {
+		pipe.SAdd(ctx, "dirty:portfolio-valuations", dirty...)
 	}
 	_, err = pipe.Exec(ctx)
 	return err
@@ -380,9 +385,13 @@ func (s *Store) BulkSaveUserValuations(ctx context.Context, vals []model.UserVal
 	defer func() { s.observeOperation(metrics.OpUserValuation, resultFromError(err), start) }()
 	pipe := s.rdb.Pipeline()
 	now := time.Now().UTC().Format(time.RFC3339Nano)
+	dirty := make([]any, 0, len(vals))
 	for _, v := range vals {
 		pipe.HSet(ctx, usrKey(v.UserID), map[string]any{fPV: v.PurchasedValue, fCV: v.CurrentValue, fPR: v.ProfitRate, fPC: v.PortfolioCount, fUA: now})
-		pipe.SAdd(ctx, "dirty:user-valuations", v.UserID)
+		dirty = append(dirty, v.UserID)
+	}
+	if len(dirty) > 0 {
+		pipe.SAdd(ctx, "dirty:user-valuations", dirty...)
 	}
 	_, err = pipe.Exec(ctx)
 	return err
