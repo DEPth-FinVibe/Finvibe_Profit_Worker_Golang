@@ -89,43 +89,22 @@ func (s *ProfitService) UpdateProfitsByStockPriceChanges(ctx context.Context, re
 	}
 	s.metrics.ObservePhase(metrics.OpStockRecalc, "pipeline_stock_cv_set", metrics.ResultSuccess, phase)
 	phase = time.Now()
-	userDelta := make(map[string]decimal.Decimal)
 	vals := make([]model.PortfolioValuation, 0, len(portfolioDelta))
-	for pf, delta := range portfolioDelta {
+	for pf := range portfolioDelta {
 		st := states[pf]
-		vals = append(vals, model.PortfolioValuation{PortfolioID: pf, PurchasedValue: st.Metadata.PurchasedValue, CurrentValue: model.RoundToInt64(st.CurrentValue), ProfitRate: model.ProfitRate(st.Metadata.PurchasedValue, st.CurrentValue), AssetCount: st.Metadata.AssetCount})
-		if st.Metadata.UserID != "" {
-			if old, ok := userDelta[st.Metadata.UserID]; ok {
-				userDelta[st.Metadata.UserID] = old.Add(delta)
-			} else {
-				userDelta[st.Metadata.UserID] = delta
-			}
-		}
+		vals = append(vals, model.PortfolioValuation{
+			PortfolioID:    pf,
+			PurchasedValue: st.Metadata.PurchasedValue,
+			CurrentValue:   model.RoundToInt64(st.CurrentValue),
+			ProfitRate:     model.ProfitRate(st.Metadata.PurchasedValue, st.CurrentValue),
+			AssetCount:     st.Metadata.AssetCount,
+		})
 	}
 	if err := s.store.BulkSavePortfolioValuations(ctx, vals); err != nil {
 		return err
 	}
 	s.metrics.ObservePhase(metrics.OpStockRecalc, "portfolio_fanout", metrics.ResultSuccess, phase)
-	phase = time.Now()
-	if len(userDelta) > 0 {
-		if err := s.recalculateUsersBulk(ctx, userDelta); err != nil {
-			return err
-		}
-	}
-	s.metrics.ObservePhase(metrics.OpStockRecalc, "user_fanout", metrics.ResultSuccess, phase)
 	s.metrics.RecordAffectedPortfolios(metrics.OpStockRecalc, len(tasks))
-	s.metrics.RecordAffectedUsers(metrics.OpStockRecalc, len(userDelta))
 	result = metrics.ResultSuccess
 	return nil
-}
-func (s *ProfitService) recalculateUsersBulk(ctx context.Context, deltas map[string]decimal.Decimal) error {
-	states, err := s.store.BulkIncrementUserCurrentValuesAndFetchMetadata(ctx, deltas)
-	if err != nil {
-		return err
-	}
-	vals := make([]model.UserValuation, 0, len(states))
-	for id, st := range states {
-		vals = append(vals, model.UserValuation{UserID: id, PurchasedValue: st.Metadata.PurchasedValue, CurrentValue: model.RoundToInt64(st.CurrentValue), ProfitRate: model.ProfitRate(st.Metadata.PurchasedValue, st.CurrentValue), PortfolioCount: st.Metadata.PortfolioCount})
-	}
-	return s.store.BulkSaveUserValuations(ctx, vals)
 }

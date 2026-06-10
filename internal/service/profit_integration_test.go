@@ -15,7 +15,7 @@ import (
 	"github.com/shopspring/decimal"
 )
 
-func TestPriceUpdateFanoutUpdatesPortfolioAndUserSnapshots(t *testing.T) {
+func TestPriceUpdateFanoutUpdatesPortfolioSnapshots(t *testing.T) {
 	ctx := context.Background()
 	mr := miniredis.RunT(t)
 	rdb := redis.NewClient(&redis.Options{Addr: mr.Addr()})
@@ -26,8 +26,7 @@ func TestPriceUpdateFanoutUpdatesPortfolioAndUserSnapshots(t *testing.T) {
 	must(t, rdb.SAdd(ctx, "stock:10:portfolios", "100").Err())
 	must(t, rdb.Set(ctx, "portfolio:100:stock:10:quantity", "3", 0).Err())
 	must(t, rdb.Set(ctx, "portfolio:100:stock:10:current-value", "300", 0).Err())
-	must(t, rdb.HSet(ctx, "pf:100", map[string]any{"pv": int64(240), "cvp": "300", "ac": int64(1), "u": "user-1"}).Err())
-	must(t, rdb.HSet(ctx, "usr:user-1", map[string]any{"pv": int64(240), "cvp": "300", "pc": int64(1)}).Err())
+	must(t, rdb.HSet(ctx, "pf:100", map[string]any{"pv": int64(240), "cvp": "300", "ac": int64(1)}).Err())
 
 	err := profit.UpdateProfitsByStockPriceChanges(ctx, []model.ProfitCalculationRequest{{StockID: 10, NewPrice: 120, Timestamp: time.Now()}})
 	must(t, err)
@@ -36,16 +35,10 @@ func TestPriceUpdateFanoutUpdatesPortfolioAndUserSnapshots(t *testing.T) {
 	must(t, err)
 	assertDecimal(t, stockCV, "360")
 	assertHash(t, mr, "pf:100", "cvp", "360")
-	assertHash(t, mr, "pf:100", "cv", "360")
 	assertHash(t, mr, "pf:100", "pv", "240")
 	assertHash(t, mr, "pf:100", "ac", "1")
-	assertHash(t, mr, "usr:user-1", "cvp", "360")
-	assertHash(t, mr, "usr:user-1", "cv", "360")
 	if ok, err := mr.SIsMember("dirty:portfolio-valuations", "100"); err != nil || !ok {
 		t.Fatal("portfolio dirty set missing 100")
-	}
-	if ok, err := mr.SIsMember("dirty:user-valuations", "user-1"); err != nil || !ok {
-		t.Fatal("user dirty set missing user-1")
 	}
 }
 

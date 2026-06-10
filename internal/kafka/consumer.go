@@ -33,7 +33,6 @@ func New(cfg config.Config, p *service.ProfitService, c *service.CacheService, m
 func (c *Consumers) Run(ctx context.Context) {
 	c.runGroup(ctx, c.cfg.StockConcurrency, c.cfg.StockTopic, c.cfg.StockGroup, c.handleStock)
 	c.runGroup(ctx, c.cfg.TradeConcurrency, c.cfg.TradeTopic, c.cfg.TradeGroup, c.handleTrade)
-	c.runGroup(ctx, c.cfg.PortfolioUserConcurrency, c.cfg.PortfolioUserTopic, c.cfg.PortfolioUserGroup, c.handlePortfolioUser)
 }
 
 func (c *Consumers) runGroup(ctx context.Context, n int, topic, group string, handler func(context.Context, []message) error) {
@@ -210,46 +209,6 @@ func (c *Consumers) handleTrade(ctx context.Context, msgs []message) error {
 		return err
 	}
 	c.recordMany(metrics.EventTrade, metrics.ResultSuccess, len(reqs))
-	result = metrics.ResultSuccess
-	return nil
-}
-
-func (c *Consumers) handlePortfolioUser(ctx context.Context, msgs []message) error {
-	start := time.Now()
-	result := metrics.ResultFailure
-	defer func() { c.metrics.ObserveListener(metrics.EventPortfolioUser, result, start) }()
-	reqs := make([]model.UserCacheUpdateRequest, 0, len(msgs))
-	skipped := 0
-	for _, m := range msgs {
-		ev, err := model.Decode[model.PortfolioUserEvent](m.value)
-		if err != nil {
-			return err
-		}
-		switch ev.EventType {
-		case "CREATED":
-			reqs = append(reqs, model.UserCacheUpdateRequest{UserID: ev.UserID, PortfolioID: ev.PortfolioID, Type: model.PortfolioCreated})
-		case "DELETED":
-			reqs = append(reqs, model.UserCacheUpdateRequest{UserID: ev.UserID, PortfolioID: ev.PortfolioID, Type: model.PortfolioDeleted})
-		case "UPDATED":
-			skipped++
-		default:
-			return fmt.Errorf("unsupported portfolio user event type: %s", ev.EventType)
-		}
-		if !ev.OccurredAt.IsZero() {
-			c.metrics.RecordAge(metrics.EventPortfolioUser, time.Since(ev.OccurredAt))
-		}
-	}
-	if len(reqs) > 0 {
-		if err := c.cache.UpdateUserCaches(ctx, reqs); err != nil {
-			c.recordMany(metrics.EventPortfolioUser, metrics.ResultFailure, len(reqs))
-			return err
-		}
-	}
-	c.recordMany(metrics.EventPortfolioUser, metrics.ResultSuccess, len(reqs))
-	for i := 0; i < skipped; i++ {
-		c.metrics.RecordSkipped(metrics.EventPortfolioUser, metrics.ReasonUpdatedEventIgnored)
-		c.metrics.RecordConsumed(metrics.EventPortfolioUser, metrics.ResultSkipped)
-	}
 	result = metrics.ResultSuccess
 	return nil
 }
