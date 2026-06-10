@@ -243,7 +243,9 @@ func (c *Consumers) handlePortfolioUser(ctx context.Context, msgs []message) err
 		}
 	}
 	c.recordMany(metrics.EventPortfolioUser, metrics.ResultSuccess, len(reqs))
-	c.recordMany(metrics.EventPortfolioUser, metrics.ResultSkipped, skipped)
+	for i := 0; i < skipped; i++ {
+		c.metrics.RecordSkipped(metrics.EventPortfolioUser, metrics.ReasonUpdatedEventIgnored)
+	}
 	result = metrics.ResultSuccess
 	return nil
 }
