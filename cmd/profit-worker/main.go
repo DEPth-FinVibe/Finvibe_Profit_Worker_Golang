@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -56,9 +57,17 @@ func main() {
 
 func newRedisClient(cfg config.Config) redis.UniversalClient {
 	if cfg.RedisMode == "cluster" && len(cfg.RedisClusterNodes) > 0 {
+		addressMap := redisClusterAddressMap(cfg.RedisClusterNodes)
 		return redis.NewClusterClient(&redis.ClusterOptions{
 			Addrs:    cfg.RedisClusterNodes,
 			Password: cfg.RedisPassword,
+			NewClient: func(opt *redis.Options) *redis.Client {
+				if replacement, ok := addressMap[opt.Addr]; ok {
+					slog.Info("redis cluster address remapped", "from", opt.Addr, "to", replacement)
+					opt.Addr = replacement
+				}
+				return redis.NewClient(opt)
+			},
 		})
 	}
 	return redis.NewClient(&redis.Options{
@@ -66,6 +75,26 @@ func newRedisClient(cfg config.Config) redis.UniversalClient {
 		Password: cfg.RedisPassword,
 		DB:       cfg.RedisDB,
 	})
+}
+
+func redisClusterAddressMap(addrs []string) map[string]string {
+	mapping := make(map[string]string)
+	for _, addr := range addrs {
+		host, port, err := net.SplitHostPort(addr)
+		if err != nil {
+			slog.Warn("redis cluster seed address ignored", "addr", addr, "err", err)
+			continue
+		}
+		ips, err := net.LookupHost(host)
+		if err != nil {
+			slog.Warn("redis cluster seed lookup failed", "addr", addr, "err", err)
+			continue
+		}
+		for _, ip := range ips {
+			mapping[net.JoinHostPort(ip, port)] = addr
+		}
+	}
+	return mapping
 }
 
 func init() { slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, nil))) }
