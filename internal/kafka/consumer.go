@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"finvibe-profit-worker-go/internal/config"
@@ -19,6 +20,7 @@ type Consumers struct {
 	profit  *service.ProfitService
 	cache   *service.CacheService
 	metrics *metrics.Metrics
+	active  atomic.Int64
 }
 
 type message struct {
@@ -35,10 +37,27 @@ func (c *Consumers) Run(ctx context.Context) {
 	c.runGroup(ctx, c.cfg.TradeConcurrency, c.cfg.TradeTopic, c.cfg.TradeGroup, c.handleTrade)
 }
 
-func (c *Consumers) runGroup(ctx context.Context, n int, topic, group string, handler func(context.Context, []message) error) {
+func (c *Consumers) Ready() bool {
+	return c.ActiveWorkers() >= c.RequiredWorkers()
+}
+
+func (c *Consumers) ActiveWorkers() int64 {
+	return c.active.Load()
+}
+
+func (c *Consumers) RequiredWorkers() int64 {
+	return int64(normalizeConcurrency(c.cfg.StockConcurrency) + normalizeConcurrency(c.cfg.TradeConcurrency))
+}
+
+func normalizeConcurrency(n int) int {
 	if n < 1 {
-		n = 1
+		return 1
 	}
+	return n
+}
+
+func (c *Consumers) runGroup(ctx context.Context, n int, topic, group string, handler func(context.Context, []message) error) {
+	n = normalizeConcurrency(n)
 	for i := 0; i < n; i++ {
 		go func(worker int) {
 			consumer, err := c.newConsumer(group)
@@ -53,6 +72,8 @@ func (c *Consumers) runGroup(ctx context.Context, n int, topic, group string, ha
 				return
 			}
 
+			c.active.Add(1)
+			defer c.active.Add(-1)
 			for ctx.Err() == nil {
 				batch, err := c.fetchBatch(ctx, consumer)
 				if err != nil {

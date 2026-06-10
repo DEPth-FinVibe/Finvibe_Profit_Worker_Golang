@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"net"
 	"net/http"
@@ -35,10 +36,9 @@ func main() {
 	consumers := kconsumer.New(cfg, profit, cache, m)
 	mux := http.NewServeMux()
 	mux.Handle("/actuator/prometheus", promhttp.HandlerFor(reg, promhttp.HandlerOpts{}))
-	mux.HandleFunc("/actuator/health", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		w.Write([]byte(`{"status":"UP"}`))
-	})
+	mux.HandleFunc("/actuator/health", livenessHandler(ctx))
+	mux.HandleFunc("/actuator/health/liveness", livenessHandler(ctx))
+	mux.HandleFunc("/actuator/health/readiness", readinessHandler(ctx, rdb, consumers))
 	srv := &http.Server{Addr: cfg.HTTPAddr, Handler: mux, ReadHeaderTimeout: 5 * time.Second}
 	go func() {
 		slog.Info("http listening", "addr", cfg.HTTPAddr)
@@ -54,6 +54,51 @@ func main() {
 	_ = srv.Shutdown(shutdownCtx)
 	_ = rdb.Close()
 	slog.Info("profit worker stopped")
+}
+
+type consumerReadiness interface {
+	Ready() bool
+	ActiveWorkers() int64
+	RequiredWorkers() int64
+}
+
+func livenessHandler(ctx context.Context) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if ctx.Err() != nil {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_, _ = w.Write([]byte(`{"status":"DOWN"}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"status":"UP"}`))
+	}
+}
+
+func readinessHandler(ctx context.Context, rdb redis.UniversalClient, consumers consumerReadiness) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if ctx.Err() != nil {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_, _ = w.Write([]byte(`{"status":"DOWN","shutdown":"true"}`))
+			return
+		}
+
+		pingCtx, cancel := context.WithTimeout(r.Context(), 500*time.Millisecond)
+		defer cancel()
+		if err := rdb.Ping(pingCtx).Err(); err != nil {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_, _ = w.Write([]byte(`{"status":"DOWN","redis":"DOWN"}`))
+			return
+		}
+
+		if !consumers.Ready() {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_, _ = w.Write([]byte(fmt.Sprintf(`{"status":"DOWN","kafka":"DOWN","activeWorkers":%d,"requiredWorkers":%d}`, consumers.ActiveWorkers(), consumers.RequiredWorkers())))
+			return
+		}
+
+		_, _ = w.Write([]byte(`{"status":"UP","redis":"UP","kafka":"UP"}`))
+	}
 }
 
 func newRedisClient(cfg config.Config) redis.UniversalClient {
