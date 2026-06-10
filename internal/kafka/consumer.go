@@ -4,13 +4,14 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"strings"
 	"time"
 
 	"finvibe-profit-worker-go/internal/config"
 	"finvibe-profit-worker-go/internal/metrics"
 	"finvibe-profit-worker-go/internal/model"
 	"finvibe-profit-worker-go/internal/service"
-	"github.com/segmentio/kafka-go"
+	ckafka "github.com/confluentinc/confluent-kafka-go/v2/kafka"
 )
 
 type Consumers struct {
@@ -20,94 +21,138 @@ type Consumers struct {
 	metrics *metrics.Metrics
 }
 
-func New(cfg config.Config, p *service.ProfitService, c *service.CacheService, m *metrics.Metrics) *Consumers {
-	return &Consumers{cfg, p, c, m}
+type message struct {
+	value []byte
+	raw   *ckafka.Message
 }
+
+func New(cfg config.Config, p *service.ProfitService, c *service.CacheService, m *metrics.Metrics) *Consumers {
+	return &Consumers{cfg: cfg, profit: p, cache: c, metrics: m}
+}
+
 func (c *Consumers) Run(ctx context.Context) {
 	c.runGroup(ctx, c.cfg.StockConcurrency, c.cfg.StockTopic, c.cfg.StockGroup, c.handleStock)
 	c.runGroup(ctx, c.cfg.TradeConcurrency, c.cfg.TradeTopic, c.cfg.TradeGroup, c.handleTrade)
 	c.runGroup(ctx, c.cfg.PortfolioUserConcurrency, c.cfg.PortfolioUserTopic, c.cfg.PortfolioUserGroup, c.handlePortfolioUser)
 }
-func (c *Consumers) runGroup(ctx context.Context, n int, topic, group string, handler func(context.Context, []kafka.Message) error) {
+
+func (c *Consumers) runGroup(ctx context.Context, n int, topic, group string, handler func(context.Context, []message) error) {
 	if n < 1 {
 		n = 1
 	}
 	for i := 0; i < n; i++ {
 		go func(worker int) {
-			r := kafka.NewReader(kafka.ReaderConfig{Brokers: c.cfg.KafkaBrokers, Topic: topic, GroupID: group, MinBytes: 1, MaxBytes: 10e6, MaxWait: 500 * time.Millisecond})
-			defer r.Close()
-			for {
-				batch, err := c.fetchBatch(ctx, r)
+			consumer, err := c.newConsumer(group)
+			if err != nil {
+				slog.Error("kafka consumer create", "topic", topic, "group", group, "err", err)
+				return
+			}
+			defer consumer.Close()
+
+			if err := consumer.SubscribeTopics([]string{topic}, nil); err != nil {
+				slog.Error("kafka subscribe", "topic", topic, "group", group, "err", err)
+				return
+			}
+
+			for ctx.Err() == nil {
+				batch, err := c.fetchBatch(ctx, consumer)
 				if err != nil {
 					if ctx.Err() != nil {
 						return
 					}
-					slog.Error("kafka fetch", "topic", topic, "err", err)
+					slog.Error("kafka fetch", "topic", topic, "group", group, "err", err)
+					time.Sleep(500 * time.Millisecond)
+					continue
+				}
+				if len(batch) == 0 {
 					continue
 				}
 				if err := handler(ctx, batch); err != nil {
-					slog.Error("kafka handle", "topic", topic, "err", err)
+					slog.Error("kafka handle", "topic", topic, "group", group, "err", err)
 					continue
 				}
-				if err := r.CommitMessages(ctx, batch...); err != nil {
-					slog.Error("kafka commit", "topic", topic, "err", err)
+				for _, msg := range batch {
+					if _, err := consumer.StoreMessage(msg.raw); err != nil {
+						slog.Error("kafka store offset", "topic", topic, "group", group, "err", err)
+						break
+					}
+				}
+				if _, err := consumer.Commit(); err != nil {
+					slog.Error("kafka commit", "topic", topic, "group", group, "err", err)
 				}
 			}
 		}(i)
 	}
 }
 
-func (c *Consumers) fetchBatch(ctx context.Context, r *kafka.Reader) ([]kafka.Message, error) {
+func (c *Consumers) newConsumer(group string) (*ckafka.Consumer, error) {
+	cfg := &ckafka.ConfigMap{
+		"bootstrap.servers":        strings.Join(c.cfg.KafkaBrokers, ","),
+		"group.id":                 group,
+		"auto.offset.reset":        "latest",
+		"enable.auto.commit":       false,
+		"enable.auto.offset.store": false,
+	}
+	if c.cfg.KafkaGroupProtocol != "" {
+		_ = cfg.SetKey("group.protocol", c.cfg.KafkaGroupProtocol)
+	}
+	return ckafka.NewConsumer(cfg)
+}
+
+func (c *Consumers) fetchBatch(ctx context.Context, consumer *ckafka.Consumer) ([]message, error) {
 	limit := c.cfg.MaxPollRecords
 	if limit < 1 {
 		limit = 1
 	}
-
-	first, err := r.FetchMessage(ctx)
-	if err != nil {
-		return nil, err
-	}
-
-	batch := make([]kafka.Message, 0, limit)
-	batch = append(batch, first)
-	if limit == 1 {
-		return batch, nil
-	}
-
 	wait := c.cfg.BatchMaxWait
 	if wait <= 0 {
 		wait = 50 * time.Millisecond
 	}
-	deadline := time.Now().Add(wait)
 
-	for len(batch) < limit {
+	batch := make([]message, 0, limit)
+	deadline := time.Now().Add(wait)
+	for len(batch) < limit && ctx.Err() == nil {
 		remaining := time.Until(deadline)
-		if remaining <= 0 {
+		if len(batch) > 0 && remaining <= 0 {
 			return batch, nil
 		}
-		fetchCtx, cancel := context.WithTimeout(ctx, remaining)
-		msg, err := r.FetchMessage(fetchCtx)
-		timedOut := fetchCtx.Err() != nil && ctx.Err() == nil
-		cancel()
-		if err != nil {
-			if timedOut {
+		pollMS := int(remaining.Milliseconds())
+		if len(batch) == 0 || pollMS < 1 {
+			pollMS = 100
+		}
+		event := consumer.Poll(pollMS)
+		if event == nil {
+			if len(batch) > 0 {
 				return batch, nil
 			}
-			return nil, err
+			continue
 		}
-		batch = append(batch, msg)
+		switch ev := event.(type) {
+		case *ckafka.Message:
+			batch = append(batch, message{value: ev.Value, raw: ev})
+		case ckafka.Error:
+			if ev.IsTimeout() {
+				if len(batch) > 0 {
+					return batch, nil
+				}
+				continue
+			}
+			return nil, ev
+		default:
+			// Rebalance/stat/log events are not data. Poll again.
+		}
 	}
-	return batch, nil
+	return batch, ctx.Err()
 }
 
-func (c *Consumers) handleStock(ctx context.Context, msgs []kafka.Message) error {
+func (c *Consumers) handleStock(ctx context.Context, msgs []message) error {
 	start := time.Now()
 	result := metrics.ResultFailure
 	defer func() { c.metrics.ObserveListener(metrics.EventStockPrice, result, start) }()
 	latest := map[int64]model.StockPriceUpdatedEvent{}
 	order := make([]int64, 0, len(msgs))
 	for _, m := range msgs {
-		ev, err := model.Decode[model.StockPriceUpdatedEvent](m.Value)
+		ev, err := model.Decode[model.StockPriceUpdatedEvent](m.value)
 		if err != nil {
 			c.recordMany(metrics.EventStockPrice, metrics.ResultFailure, len(msgs))
 			return err
@@ -137,13 +182,14 @@ func (c *Consumers) handleStock(ctx context.Context, msgs []kafka.Message) error
 	result = metrics.ResultSuccess
 	return nil
 }
-func (c *Consumers) handleTrade(ctx context.Context, msgs []kafka.Message) error {
+
+func (c *Consumers) handleTrade(ctx context.Context, msgs []message) error {
 	start := time.Now()
 	result := metrics.ResultFailure
 	defer func() { c.metrics.ObserveListener(metrics.EventTrade, result, start) }()
 	reqs := make([]model.PortfolioCacheUpdateRequest, 0, len(msgs))
 	for _, m := range msgs {
-		ev, err := model.Decode[model.PortfolioTradeEvent](m.Value)
+		ev, err := model.Decode[model.PortfolioTradeEvent](m.value)
 		if err != nil {
 			return err
 		}
@@ -167,14 +213,15 @@ func (c *Consumers) handleTrade(ctx context.Context, msgs []kafka.Message) error
 	result = metrics.ResultSuccess
 	return nil
 }
-func (c *Consumers) handlePortfolioUser(ctx context.Context, msgs []kafka.Message) error {
+
+func (c *Consumers) handlePortfolioUser(ctx context.Context, msgs []message) error {
 	start := time.Now()
 	result := metrics.ResultFailure
 	defer func() { c.metrics.ObserveListener(metrics.EventPortfolioUser, result, start) }()
 	reqs := make([]model.UserCacheUpdateRequest, 0, len(msgs))
 	skipped := 0
 	for _, m := range msgs {
-		ev, err := model.Decode[model.PortfolioUserEvent](m.Value)
+		ev, err := model.Decode[model.PortfolioUserEvent](m.value)
 		if err != nil {
 			return err
 		}
@@ -200,6 +247,7 @@ func (c *Consumers) handlePortfolioUser(ctx context.Context, msgs []kafka.Messag
 	result = metrics.ResultSuccess
 	return nil
 }
+
 func (c *Consumers) recordMany(event, result string, n int) {
 	for i := 0; i < n; i++ {
 		c.metrics.RecordConsumed(event, result)

@@ -1,12 +1,15 @@
-FROM golang:1.22-alpine AS build
+FROM golang:1.25-bookworm AS build
 WORKDIR /src
 COPY go.mod go.sum* ./
 RUN go mod download
 COPY . .
-RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/profit-worker ./cmd/profit-worker
+RUN CGO_ENABLED=1 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/profit-worker ./cmd/profit-worker
 
-FROM alpine:3.20
-RUN adduser -D -H app
+FROM debian:bookworm-slim
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates \
+    && rm -rf /var/lib/apt/lists/* \
+    && useradd --system --no-create-home app
 USER app
 COPY --from=build /out/profit-worker /profit-worker
 EXPOSE 8080

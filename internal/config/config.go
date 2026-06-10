@@ -24,6 +24,7 @@ type Config struct {
 	StockConcurrency         int
 	TradeConcurrency         int
 	PortfolioUserConcurrency int
+	KafkaGroupProtocol       string
 	MaxPollRecords           int
 	BatchMaxWait             time.Duration
 	ShutdownTimeout          time.Duration
@@ -47,6 +48,7 @@ func Load() Config {
 		StockConcurrency:         getint("KAFKA_CONCURRENCY_STOCK_PRICE", 2),
 		TradeConcurrency:         getint("KAFKA_CONCURRENCY_TRADE", 1),
 		PortfolioUserConcurrency: getint("KAFKA_CONCURRENCY_PORTFOLIO", 1),
+		KafkaGroupProtocol:       getenv("KAFKA_GROUP_PROTOCOL", "consumer"),
 		MaxPollRecords:           getint("KAFKA_MAX_POLL_RECORDS", 100),
 		BatchMaxWait:             time.Duration(getint("KAFKA_BATCH_MAX_WAIT_MS", 50)) * time.Millisecond,
 		ShutdownTimeout:          time.Duration(getint("SHUTDOWN_TIMEOUT_SECONDS", 20)) * time.Second,
