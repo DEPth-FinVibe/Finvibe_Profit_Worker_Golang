@@ -58,6 +58,7 @@ type Metrics struct {
 }
 
 func New(reg *prometheus.Registry) *Metrics {
+	wrapped := prometheus.WrapRegistererWith(prometheus.Labels{"worker_runtime": "golang"}, reg)
 	m := &Metrics{
 		listener:           prometheus.NewHistogramVec(prometheus.HistogramOpts{Name: "profit_worker_listener_duration_seconds", Help: "Kafka listener duration"}, []string{"event_type", "result"}),
 		service:            prometheus.NewHistogramVec(prometheus.HistogramOpts{Name: "profit_worker_service_duration_seconds", Help: "Application service duration"}, []string{"operation", "result"}),
@@ -75,7 +76,7 @@ func New(reg *prometheus.Registry) *Metrics {
 		affectedPortfolios: prometheus.NewSummaryVec(prometheus.SummaryOpts{Name: "profit_worker_affected_portfolios", Help: "Affected portfolios"}, []string{"operation"}),
 		affectedUsers:      prometheus.NewSummaryVec(prometheus.SummaryOpts{Name: "profit_worker_affected_users", Help: "Affected users"}, []string{"operation"}),
 	}
-	reg.MustRegister(
+	wrapped.MustRegister(
 		m.listener,
 		m.service,
 		m.phase,
