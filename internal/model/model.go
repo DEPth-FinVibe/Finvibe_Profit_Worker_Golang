@@ -14,6 +14,7 @@ import (
 type Decimal = decimal.Decimal
 
 var Zero = decimal.Zero
+var seoulLocation = time.FixedZone("Asia/Seoul", 9*60*60)
 
 type StockPriceUpdatedEvent struct {
 	StockID   int64       `json:"stockId"`
@@ -157,7 +158,7 @@ func (lt *LocalTime) UnmarshalJSON(b []byte) error {
 	layouts := []string{time.RFC3339Nano, "2006-01-02T15:04:05.999999999", "2006-01-02T15:04:05"}
 	var last error
 	for _, layout := range layouts {
-		if t, err := time.ParseInLocation(layout, s, time.Local); err == nil {
+		if t, err := time.ParseInLocation(layout, s, seoulLocation); err == nil {
 			lt.Time = t
 			return nil
 		} else {
