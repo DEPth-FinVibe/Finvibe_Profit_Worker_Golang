@@ -26,7 +26,9 @@ func TestPriceUpdateFanoutUpdatesPortfolioSnapshots(t *testing.T) {
 	must(t, rdb.SAdd(ctx, "stock:10:portfolios", "100").Err())
 	must(t, rdb.Set(ctx, "portfolio:100:stock:10:quantity", "3", 0).Err())
 	must(t, rdb.Set(ctx, "portfolio:100:stock:10:current-value", "300", 0).Err())
-	must(t, rdb.HSet(ctx, "pf:100", map[string]any{"pv": int64(240), "cvp": "300", "ac": int64(1)}).Err())
+	must(t, rdb.HSet(ctx, "pf:100", map[string]any{"pv": int64(240), "cvp": "300", "ac": int64(1), "u": "7"}).Err())
+	must(t, rdb.HSet(ctx, "usr:7", map[string]any{"pv": int64(240), "cvp": "300", "pc": int64(1)}).Err())
+	must(t, rdb.SAdd(ctx, "user:7:portfolios", "100").Err())
 
 	err := profit.UpdateProfitsByStockPriceChanges(ctx, []model.ProfitCalculationRequest{{StockID: 10, NewPrice: 120, Timestamp: time.Now()}})
 	must(t, err)
@@ -37,9 +39,50 @@ func TestPriceUpdateFanoutUpdatesPortfolioSnapshots(t *testing.T) {
 	assertHash(t, mr, "pf:100", "cvp", "360")
 	assertHash(t, mr, "pf:100", "pv", "240")
 	assertHash(t, mr, "pf:100", "ac", "1")
+	assertHash(t, mr, "usr:7", "cvp", "360")
+	assertHash(t, mr, "usr:7", "pr", "50")
+	assertUpdatedAt(t, mr, "pf:100")
+	assertUpdatedAt(t, mr, "usr:7")
 	if ok, err := mr.SIsMember("dirty:portfolio-valuations", "100"); err != nil || !ok {
 		t.Fatal("portfolio dirty set missing 100")
 	}
+	if ok, err := mr.SIsMember("dirty:user-valuations", "7"); err != nil || !ok {
+		t.Fatal("user dirty set missing 7")
+	}
+
+	// 같은 가격 이벤트를 재처리해도 종목 현재가의 delta가 0이므로 평가액이 중복 반영되지 않는다.
+	err = profit.UpdateProfitsByStockPriceChanges(ctx, []model.ProfitCalculationRequest{{StockID: 10, NewPrice: 120, Timestamp: time.Now()}})
+	must(t, err)
+	assertHash(t, mr, "pf:100", "cvp", "360")
+	assertHash(t, mr, "usr:7", "cvp", "360")
+}
+
+func TestPriceUpdateRecalculatesOneUserAcrossMultiplePortfolios(t *testing.T) {
+	ctx := context.Background()
+	mr := miniredis.RunT(t)
+	rdb := redis.NewClient(&redis.Options{Addr: mr.Addr()})
+	m := metrics.New(prometheus.NewRegistry())
+	store := redisstore.New(rdb, m)
+	profit := service.NewProfitService(store, m)
+
+	must(t, rdb.SAdd(ctx, "stock:10:portfolios", "100", "200").Err())
+	must(t, rdb.SAdd(ctx, "user:7:portfolios", "100", "200").Err())
+	must(t, rdb.Set(ctx, "portfolio:100:stock:10:quantity", "3", 0).Err())
+	must(t, rdb.Set(ctx, "portfolio:100:stock:10:current-value", "300", 0).Err())
+	must(t, rdb.Set(ctx, "portfolio:200:stock:10:quantity", "2", 0).Err())
+	must(t, rdb.Set(ctx, "portfolio:200:stock:10:current-value", "200", 0).Err())
+	must(t, rdb.HSet(ctx, "pf:100", map[string]any{"pv": "240", "cvp": "300", "ac": "1", "u": "7"}).Err())
+	must(t, rdb.HSet(ctx, "pf:200", map[string]any{"pv": "180", "cvp": "200", "ac": "1", "u": "7"}).Err())
+	must(t, rdb.HSet(ctx, "usr:7", map[string]any{"pv": "420", "cvp": "500", "pc": "2"}).Err())
+
+	must(t, profit.UpdateProfitsByStockPriceChanges(ctx, []model.ProfitCalculationRequest{
+		{StockID: 10, NewPrice: 120, Timestamp: time.Now()},
+	}))
+
+	assertHash(t, mr, "pf:100", "cvp", "360")
+	assertHash(t, mr, "pf:200", "cvp", "240")
+	assertHash(t, mr, "usr:7", "cvp", "600")
+	assertHash(t, mr, "usr:7", "cv", "600")
 }
 
 func assertDecimal(t *testing.T, got, want string) {
@@ -56,6 +99,14 @@ func assertHash(t *testing.T, mr *miniredis.Miniredis, key, field, want string) 
 	t.Helper()
 	got := mr.HGet(key, field)
 	assertDecimal(t, got, want)
+}
+func assertUpdatedAt(t *testing.T, mr *miniredis.Miniredis, key string) {
+	t.Helper()
+	if updatedAt := mr.HGet(key, "ua"); updatedAt == "" {
+		t.Fatalf("updatedAt is missing from %s", key)
+	} else if _, err := time.Parse(time.RFC3339Nano, updatedAt); err != nil {
+		t.Fatalf("invalid updatedAt in %s: %v", key, err)
+	}
 }
 func must(t *testing.T, err error) {
 	t.Helper()

@@ -105,6 +105,41 @@ func (s *ProfitService) UpdateProfitsByStockPriceChanges(ctx context.Context, re
 	}
 	s.metrics.ObservePhase(metrics.OpStockRecalc, "portfolio_fanout", metrics.ResultSuccess, phase)
 	s.metrics.RecordAffectedPortfolios(metrics.OpStockRecalc, len(tasks))
+
+	phase = time.Now()
+	affectedUsers := make(map[string]struct{})
+	for portfolioID := range portfolioDelta {
+		userID := states[portfolioID].Metadata.UserID
+		if userID == "" {
+			continue
+		}
+		affectedUsers[userID] = struct{}{}
+	}
+	if len(affectedUsers) > 0 {
+		userIDs := make([]string, 0, len(affectedUsers))
+		for userID := range affectedUsers {
+			userIDs = append(userIDs, userID)
+		}
+		userStates, err := s.store.BulkRecalculateUserCurrentValuesAndFetchMetadata(ctx, userIDs)
+		if err != nil {
+			return err
+		}
+		userVals := make([]model.UserValuation, 0, len(userStates))
+		for userID, state := range userStates {
+			userVals = append(userVals, model.UserValuation{
+				UserID:         userID,
+				PurchasedValue: state.Metadata.PurchasedValue,
+				CurrentValue:   model.RoundToInt64(state.CurrentValue),
+				ProfitRate:     model.ProfitRate(state.Metadata.PurchasedValue, state.CurrentValue),
+				PortfolioCount: state.Metadata.PortfolioCount,
+			})
+		}
+		if err := s.store.BulkSaveUserValuations(ctx, userVals); err != nil {
+			return err
+		}
+	}
+	s.metrics.ObservePhase(metrics.OpStockRecalc, "user_fanout", metrics.ResultSuccess, phase)
+	s.metrics.RecordAffectedUsers(metrics.OpStockRecalc, len(affectedUsers))
 	result = metrics.ResultSuccess
 	return nil
 }
