@@ -56,8 +56,10 @@ const (
 )
 
 type PortfolioCacheUpdateRequest struct {
+	TradeID     int64
 	PortfolioID int64
 	StockID     int64
+	UserID      string
 	Type        PortfolioTradeType
 	Price       int64
 	Quantity    Decimal

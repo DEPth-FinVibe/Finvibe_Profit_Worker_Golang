@@ -40,6 +40,7 @@ const (
 	fCVP = "cvp"
 	fAC  = "ac"
 	fU   = "u"
+	fUCP = "ucp"
 	fDel = "del"
 	fDA  = "da"
 	fUA  = "ua"
@@ -58,8 +59,18 @@ func quantityKey(portfolioID, stockID int64) string {
 func currentValueKey(portfolioID, stockID int64) string {
 	return fmt.Sprintf("portfolio:%d:stock:%d:current-value", portfolioID, stockID)
 }
+func processedTradeKey(tradeID int64) string { return fmt.Sprintf("processed:trade:%d", tradeID) }
 func (s *Store) StockCurrentValueKey(portfolioID, stockID int64) string {
 	return currentValueKey(portfolioID, stockID)
+}
+
+func (s *Store) IsTradeProcessed(ctx context.Context, tradeID int64) (bool, error) {
+	count, err := s.rdb.Exists(ctx, processedTradeKey(tradeID)).Result()
+	return count > 0, err
+}
+
+func (s *Store) MarkTradeProcessed(ctx context.Context, tradeID int64) error {
+	return s.rdb.Set(ctx, processedTradeKey(tradeID), "1", 7*24*time.Hour).Err()
 }
 
 func (s *Store) FindPortfolioIDsByStockID(ctx context.Context, stockID int64) ([]int64, error) {
@@ -204,6 +215,80 @@ func (s *Store) BulkIncrementUserCurrentValuesAndFetchMetadata(ctx context.Conte
 	return out, nil
 }
 
+func (s *Store) BulkRecalculateUserCurrentValuesAndFetchMetadata(ctx context.Context, userIDs []string) (map[string]model.UserStateSnapshot, error) {
+	opStart := time.Now()
+	opResult := metrics.ResultFailure
+	defer func() { s.observeOperation(metrics.OpUserCurrent, opResult, opStart) }()
+
+	portfolioSets := make([]*redis.StringSliceCmd, len(userIDs))
+	pipe := s.rdb.Pipeline()
+	for i, userID := range userIDs {
+		portfolioSets[i] = pipe.SMembers(ctx, userPortfoliosKey(userID))
+	}
+	if _, err := pipe.Exec(ctx); err != nil && err != redis.Nil {
+		return nil, err
+	}
+
+	type holding struct {
+		userID string
+		cmd    *redis.SliceCmd
+	}
+	holdings := make([]holding, 0)
+	pipe = s.rdb.Pipeline()
+	for i, userID := range userIDs {
+		for _, portfolioID := range portfolioSets[i].Val() {
+			id, err := strconv.ParseInt(portfolioID, 10, 64)
+			if err != nil {
+				continue
+			}
+			holdings = append(holdings, holding{
+				userID: userID,
+				cmd:    pipe.HMGet(ctx, pfKey(id), fCVP, fCV),
+			})
+		}
+	}
+	if _, err := pipe.Exec(ctx); err != nil && err != redis.Nil {
+		return nil, err
+	}
+
+	totals := make(map[string]decimal.Decimal, len(userIDs))
+	for _, userID := range userIDs {
+		totals[userID] = decimal.Zero
+	}
+	for _, holding := range holdings {
+		values := holding.cmd.Val()
+		currentValue := parseDecimal(asString(values, 0))
+		if asString(values, 0) == "" {
+			currentValue = parseDecimal(asString(values, 1))
+		}
+		totals[holding.userID] = totals[holding.userID].Add(currentValue)
+	}
+
+	metadata := make([]*redis.SliceCmd, len(userIDs))
+	pipe = s.rdb.Pipeline()
+	for i, userID := range userIDs {
+		pipe.HSet(ctx, usrKey(userID), fCVP, totals[userID].String())
+		metadata[i] = pipe.HMGet(ctx, usrKey(userID), fPV, fPC)
+	}
+	if _, err := pipe.Exec(ctx); err != nil && err != redis.Nil {
+		return nil, err
+	}
+
+	out := make(map[string]model.UserStateSnapshot, len(userIDs))
+	for i, userID := range userIDs {
+		values := metadata[i].Val()
+		out[userID] = model.UserStateSnapshot{
+			CurrentValue: totals[userID],
+			Metadata: model.UserMetadata{
+				PurchasedValue: asInt(values, 0),
+				PortfolioCount: asInt(values, 1),
+			},
+		}
+	}
+	opResult = metrics.ResultSuccess
+	return out, nil
+}
+
 func (s *Store) IncreaseStockQuantity(ctx context.Context, stockID, portfolioID int64, qty decimal.Decimal) (bool, error) {
 	old := s.getDec(ctx, quantityKey(portfolioID, stockID))
 	added := old.IsZero()
@@ -291,10 +376,23 @@ func (s *Store) MapPortfolioToUser(ctx context.Context, portfolioID int64, userI
 	_, err := pipe.Exec(ctx)
 	return err
 }
+func (s *Store) MapPortfolioToUserFromTrade(ctx context.Context, portfolioID int64, userID string) error {
+	pipe := s.rdb.Pipeline()
+	pipe.HSet(ctx, pfKey(portfolioID), fU, userID, fUCP, "1")
+	pipe.SAdd(ctx, userPortfoliosKey(userID), strconv.FormatInt(portfolioID, 10))
+	_, err := pipe.Exec(ctx)
+	return err
+}
+func (s *Store) IsPortfolioCountPending(ctx context.Context, portfolioID int64) bool {
+	return s.rdb.HGet(ctx, pfKey(portfolioID), fUCP).Val() == "1"
+}
+func (s *Store) ClearPortfolioCountPending(ctx context.Context, portfolioID int64) error {
+	return s.rdb.HDel(ctx, pfKey(portfolioID), fUCP).Err()
+}
 func (s *Store) RemovePortfolioUserMapping(ctx context.Context, portfolioID int64) error {
 	userID := s.FindUserIDByPortfolioID(ctx, portfolioID)
 	pipe := s.rdb.Pipeline()
-	pipe.HDel(ctx, pfKey(portfolioID), fU)
+	pipe.HDel(ctx, pfKey(portfolioID), fU, fUCP)
 	if userID != "" {
 		pipe.SRem(ctx, userPortfoliosKey(userID), strconv.FormatInt(portfolioID, 10))
 	}
@@ -306,6 +404,12 @@ func (s *Store) AddUserPurchasedValue(ctx context.Context, id string, amount int
 }
 func (s *Store) SubtractUserPurchasedValue(ctx context.Context, id string, amount int64) error {
 	return s.rdb.HIncrBy(ctx, usrKey(id), fPV, -amount).Err()
+}
+func (s *Store) AddUserCurrentValue(ctx context.Context, id string, amount decimal.Decimal) error {
+	return s.rdb.HIncrByFloat(ctx, usrKey(id), fCVP, toFloat(amount)).Err()
+}
+func (s *Store) SubtractUserCurrentValue(ctx context.Context, id string, amount decimal.Decimal) error {
+	return s.rdb.HIncrByFloat(ctx, usrKey(id), fCVP, -toFloat(amount)).Err()
 }
 func (s *Store) IncreasePortfolioCount(ctx context.Context, id string) error {
 	return s.rdb.HIncrBy(ctx, usrKey(id), fPC, 1).Err()

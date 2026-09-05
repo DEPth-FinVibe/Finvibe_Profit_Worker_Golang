@@ -35,6 +35,7 @@ func New(cfg config.Config, p *service.ProfitService, c *service.CacheService, m
 func (c *Consumers) Run(ctx context.Context) {
 	c.runGroup(ctx, c.cfg.StockConcurrency, c.cfg.StockTopic, c.cfg.StockGroup, c.handleStock)
 	c.runGroup(ctx, c.cfg.TradeConcurrency, c.cfg.TradeTopic, c.cfg.TradeGroup, c.handleTrade)
+	c.runGroup(ctx, c.cfg.PortfolioUserConcurrency, c.cfg.PortfolioUserTopic, c.cfg.PortfolioUserGroup, c.handlePortfolioUser)
 }
 
 func (c *Consumers) Ready() bool {
@@ -46,7 +47,7 @@ func (c *Consumers) ActiveWorkers() int64 {
 }
 
 func (c *Consumers) RequiredWorkers() int64 {
-	return int64(normalizeConcurrency(c.cfg.StockConcurrency) + normalizeConcurrency(c.cfg.TradeConcurrency))
+	return int64(normalizeConcurrency(c.cfg.StockConcurrency) + normalizeConcurrency(c.cfg.TradeConcurrency) + normalizeConcurrency(c.cfg.PortfolioUserConcurrency))
 }
 
 func normalizeConcurrency(n int) int {
@@ -89,16 +90,30 @@ func (c *Consumers) runGroup(ctx context.Context, n int, topic, group string, ha
 				}
 				if err := handler(ctx, batch); err != nil {
 					slog.Error("kafka handle", "topic", topic, "group", group, "err", err)
+					if seekErr := rewindBatch(consumer, batch); seekErr != nil {
+						slog.Error("kafka rewind", "topic", topic, "group", group, "err", seekErr)
+					}
 					continue
 				}
+				stored := true
 				for _, msg := range batch {
 					if _, err := consumer.StoreMessage(msg.raw); err != nil {
 						slog.Error("kafka store offset", "topic", topic, "group", group, "err", err)
+						stored = false
 						break
 					}
 				}
+				if !stored {
+					if seekErr := rewindBatch(consumer, batch); seekErr != nil {
+						slog.Error("kafka rewind after offset store failure", "topic", topic, "group", group, "err", seekErr)
+					}
+					continue
+				}
 				if _, err := consumer.Commit(); err != nil {
 					slog.Error("kafka commit", "topic", topic, "group", group, "err", err)
+					if seekErr := rewindBatch(consumer, batch); seekErr != nil {
+						slog.Error("kafka rewind after commit failure", "topic", topic, "group", group, "err", seekErr)
+					}
 				}
 			}
 		}(i)
@@ -223,14 +238,68 @@ func (c *Consumers) handleTrade(ctx context.Context, msgs []message) error {
 		} else if ev.Type != "BUY" {
 			return fmt.Errorf("unsupported trade type: %s", ev.Type)
 		}
-		reqs = append(reqs, model.PortfolioCacheUpdateRequest{PortfolioID: ev.PortfolioID, StockID: ev.StockID, Type: typ, Price: ev.Price, Quantity: qty})
+		reqs = append(reqs, model.PortfolioCacheUpdateRequest{TradeID: ev.TradeID, PortfolioID: ev.PortfolioID, StockID: ev.StockID, UserID: ev.UserID, Type: typ, Price: ev.Price, Quantity: qty})
 	}
-	if err := c.cache.UpdatePortfolioCaches(ctx, reqs); err != nil {
-		c.recordMany(metrics.EventTrade, metrics.ResultFailure, len(reqs))
-		return err
+	for _, request := range reqs {
+		if err := c.cache.UpdatePortfolioCaches(ctx, []model.PortfolioCacheUpdateRequest{request}); err != nil {
+			c.recordMany(metrics.EventTrade, metrics.ResultFailure, 1)
+			return err
+		}
 	}
 	c.recordMany(metrics.EventTrade, metrics.ResultSuccess, len(reqs))
 	result = metrics.ResultSuccess
+	return nil
+}
+
+func (c *Consumers) handlePortfolioUser(ctx context.Context, msgs []message) error {
+	start := time.Now()
+	result := metrics.ResultFailure
+	defer func() { c.metrics.ObserveListener(metrics.EventPortfolioUser, result, start) }()
+
+	reqs := make([]model.UserCacheUpdateRequest, 0, len(msgs))
+	for _, m := range msgs {
+		ev, err := model.Decode[model.PortfolioUserEvent](m.value)
+		if err != nil {
+			c.recordMany(metrics.EventPortfolioUser, metrics.ResultFailure, len(msgs))
+			return err
+		}
+		c.metrics.RecordAge(metrics.EventPortfolioUser, time.Since(ev.OccurredAt))
+		switch ev.EventType {
+		case "CREATED":
+			reqs = append(reqs, model.UserCacheUpdateRequest{UserID: ev.UserID, PortfolioID: ev.PortfolioID, Type: model.PortfolioCreated})
+		case "DELETED":
+			reqs = append(reqs, model.UserCacheUpdateRequest{UserID: ev.UserID, PortfolioID: ev.PortfolioID, Type: model.PortfolioDeleted})
+		case "UPDATED":
+			c.metrics.RecordSkipped(metrics.EventPortfolioUser, metrics.ReasonUpdatedEventIgnored)
+		default:
+			c.recordMany(metrics.EventPortfolioUser, metrics.ResultFailure, len(msgs))
+			return fmt.Errorf("unsupported portfolio user event type %s", ev.EventType)
+		}
+	}
+	if err := c.cache.UpdateUserCaches(ctx, reqs); err != nil {
+		c.recordMany(metrics.EventPortfolioUser, metrics.ResultFailure, len(reqs))
+		return err
+	}
+	c.recordMany(metrics.EventPortfolioUser, metrics.ResultSuccess, len(reqs))
+	result = metrics.ResultSuccess
+	return nil
+}
+
+func rewindBatch(consumer *ckafka.Consumer, batch []message) error {
+	earliest := make(map[string]ckafka.TopicPartition)
+	for _, msg := range batch {
+		tp := msg.raw.TopicPartition
+		key := fmt.Sprintf("%s:%d", *tp.Topic, tp.Partition)
+		current, exists := earliest[key]
+		if !exists || tp.Offset < current.Offset {
+			earliest[key] = tp
+		}
+	}
+	for _, partition := range earliest {
+		if err := consumer.Seek(partition, 5_000); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
