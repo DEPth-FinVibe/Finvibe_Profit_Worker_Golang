@@ -37,6 +37,7 @@ func TestPriceUpdateFanoutUpdatesPortfolioSnapshots(t *testing.T) {
 	must(t, err)
 	assertDecimal(t, stockCV, "360")
 	assertHash(t, mr, "pf:100", "cvp", "360")
+	assertHash(t, mr, "pf:100", "scv:10", "360")
 	assertHash(t, mr, "pf:100", "pv", "240")
 	assertHash(t, mr, "pf:100", "ac", "1")
 	assertHash(t, mr, "usr:7", "cvp", "360")
@@ -54,6 +55,7 @@ func TestPriceUpdateFanoutUpdatesPortfolioSnapshots(t *testing.T) {
 	err = profit.UpdateProfitsByStockPriceChanges(ctx, []model.ProfitCalculationRequest{{StockID: 10, NewPrice: 120, Timestamp: time.Now()}})
 	must(t, err)
 	assertHash(t, mr, "pf:100", "cvp", "360")
+	assertHash(t, mr, "pf:100", "scv:10", "360")
 	assertHash(t, mr, "usr:7", "cvp", "360")
 }
 
@@ -80,7 +82,9 @@ func TestPriceUpdateRecalculatesOneUserAcrossMultiplePortfolios(t *testing.T) {
 	}))
 
 	assertHash(t, mr, "pf:100", "cvp", "360")
+	assertHash(t, mr, "pf:100", "scv:10", "360")
 	assertHash(t, mr, "pf:200", "cvp", "240")
+	assertHash(t, mr, "pf:200", "scv:10", "240")
 	assertHash(t, mr, "usr:7", "cvp", "600")
 	assertHash(t, mr, "usr:7", "cv", "600")
 }

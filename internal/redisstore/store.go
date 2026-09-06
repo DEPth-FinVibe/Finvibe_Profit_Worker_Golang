@@ -59,7 +59,8 @@ func quantityKey(portfolioID, stockID int64) string {
 func currentValueKey(portfolioID, stockID int64) string {
 	return fmt.Sprintf("portfolio:%d:stock:%d:current-value", portfolioID, stockID)
 }
-func processedTradeKey(tradeID int64) string { return fmt.Sprintf("processed:trade:%d", tradeID) }
+func stockCurrentValueField(stockID int64) string { return fmt.Sprintf("scv:%d", stockID) }
+func processedTradeKey(tradeID int64) string      { return fmt.Sprintf("processed:trade:%d", tradeID) }
 func (s *Store) StockCurrentValueKey(portfolioID, stockID int64) string {
 	return currentValueKey(portfolioID, stockID)
 }
@@ -119,10 +120,12 @@ func (s *Store) BulkFindPortfolioIDsByStockIDs(ctx context.Context, stockIDs []i
 func (s *Store) BulkFetchStockHoldings(ctx context.Context, keys []model.StockHoldingKey) (map[string]model.StockHolding, error) {
 	pipe := s.rdb.Pipeline()
 	qcmd := make([]*redis.StringCmd, len(keys))
+	hcmd := make([]*redis.StringCmd, len(keys))
 	ccmd := make([]*redis.StringCmd, len(keys))
 	start := time.Now()
 	for i, k := range keys {
 		qcmd[i] = pipe.Get(ctx, quantityKey(k.PortfolioID, k.StockID))
+		hcmd[i] = pipe.HGet(ctx, pfKey(k.PortfolioID), stockCurrentValueField(k.StockID))
 		ccmd[i] = pipe.Get(ctx, currentValueKey(k.PortfolioID, k.StockID))
 	}
 	_, err := pipe.Exec(ctx)
@@ -130,12 +133,16 @@ func (s *Store) BulkFetchStockHoldings(ctx context.Context, keys []model.StockHo
 	if err != nil && err != redis.Nil {
 		return nil, err
 	}
-	if err := check("bulkFetchStockHoldings", 2*len(keys), len(qcmd)+len(ccmd)); err != nil {
+	if err := check("bulkFetchStockHoldings", 3*len(keys), len(qcmd)+len(hcmd)+len(ccmd)); err != nil {
 		return nil, err
 	}
 	out := make(map[string]model.StockHolding, len(keys))
 	for i, k := range keys {
-		out[k.String()] = model.StockHolding{Quantity: parseDecimal(qcmd[i].Val()), CurrentValue: parseDecimal(ccmd[i].Val())}
+		currentValue := hcmd[i].Val()
+		if currentValue == "" {
+			currentValue = ccmd[i].Val()
+		}
+		out[k.String()] = model.StockHolding{Quantity: parseDecimal(qcmd[i].Val()), CurrentValue: parseDecimal(currentValue)}
 	}
 	return out, nil
 }
@@ -152,33 +159,92 @@ func (s *Store) BulkSetStockCurrentValues(ctx context.Context, updates map[strin
 	}
 	return err
 }
-func (s *Store) BulkIncrementPortfolioCurrentValuesAndFetchMetadata(ctx context.Context, deltas map[int64]decimal.Decimal) (map[int64]model.PortfolioStateSnapshot, error) {
+
+type StockCurrentValueReplacement struct {
+	StockID       int64
+	PreviousValue decimal.Decimal
+	CurrentValue  decimal.Decimal
+}
+
+const replaceStockCurrentValuesScript = `
+local portfolio_key = KEYS[1]
+local portfolio_current = redis.call('HGET', portfolio_key, 'cvp')
+if not portfolio_current then
+    portfolio_current = redis.call('HGET', portfolio_key, 'cv') or '0'
+    redis.call('HSET', portfolio_key, 'cvp', portfolio_current)
+end
+
+local total_delta = 0
+for i = 1, #ARGV, 3 do
+    local field = ARGV[i]
+    local new_value = ARGV[i + 1]
+    local previous_value = redis.call('HGET', portfolio_key, field)
+    if not previous_value then
+        previous_value = ARGV[i + 2]
+    end
+    total_delta = total_delta + (tonumber(new_value) - tonumber(previous_value))
+    redis.call('HSET', portfolio_key, field, new_value)
+end
+
+if total_delta ~= 0 then
+    portfolio_current = redis.call('HINCRBYFLOAT', portfolio_key, 'cvp', total_delta)
+else
+    portfolio_current = redis.call('HGET', portfolio_key, 'cvp')
+end
+
+return {
+    portfolio_current,
+    redis.call('HGET', portfolio_key, 'pv') or '',
+    redis.call('HGET', portfolio_key, 'ac') or '',
+    redis.call('HGET', portfolio_key, 'u') or ''
+}
+`
+
+func (s *Store) BulkReplaceStockCurrentValuesAndFetchMetadata(ctx context.Context, replacements map[int64][]StockCurrentValueReplacement) (map[int64]model.PortfolioStateSnapshot, error) {
 	opStart := time.Now()
 	opResult := metrics.ResultFailure
 	defer func() { s.observeOperation(metrics.OpPortfolioCurrent, opResult, opStart) }()
 
 	pipe := s.rdb.Pipeline()
-	ids := make([]int64, 0, len(deltas))
-	incr := make([]*redis.FloatCmd, 0, len(deltas))
-	meta := make([]*redis.SliceCmd, 0, len(deltas))
+	ids := make([]int64, 0, len(replacements))
+	cmds := make([]*redis.Cmd, 0, len(replacements))
 	start := time.Now()
-	for id, d := range deltas {
+	for id, portfolioReplacements := range replacements {
 		ids = append(ids, id)
-		incr = append(incr, pipe.HIncrByFloat(ctx, pfKey(id), fCVP, toFloat(d)))
-		meta = append(meta, pipe.HMGet(ctx, pfKey(id), fPV, fAC, fU))
+		args := make([]any, 0, 3*len(portfolioReplacements))
+		for _, replacement := range portfolioReplacements {
+			args = append(args,
+				stockCurrentValueField(replacement.StockID),
+				replacement.CurrentValue.String(),
+				replacement.PreviousValue.String(),
+			)
+		}
+		cmds = append(cmds, pipe.Eval(ctx, replaceStockCurrentValuesScript, []string{pfKey(id)}, args...))
 	}
 	_, err := pipe.Exec(ctx)
-	s.observe("pipeline_hincrbyfloat_hmget_portfolio", err, start)
+	s.observe("pipeline_eval_replace_stock_cv", err, start)
 	if err != nil && err != redis.Nil {
 		return nil, err
 	}
-	if err := check("bulkIncrementCurrentValuesAndFetchMetadata(portfolio)", 2*len(ids), len(incr)+len(meta)); err != nil {
+	if err := check("bulkReplaceStockCurrentValuesAndFetchMetadata", len(ids), len(cmds)); err != nil {
 		return nil, err
 	}
 	out := make(map[int64]model.PortfolioStateSnapshot, len(ids))
 	for i, id := range ids {
-		vals := meta[i].Val()
-		out[id] = model.PortfolioStateSnapshot{CurrentValue: decimal.NewFromFloat(incr[i].Val()), Metadata: model.PortfolioMetadata{PurchasedValue: asInt(vals, 0), AssetCount: asInt(vals, 1), UserID: asString(vals, 2), CurrentValue: decimal.NewFromFloat(incr[i].Val())}}
+		vals, resultErr := cmds[i].Slice()
+		if resultErr != nil {
+			return nil, resultErr
+		}
+		currentValue := parseDecimal(asString(vals, 0))
+		out[id] = model.PortfolioStateSnapshot{
+			CurrentValue: currentValue,
+			Metadata: model.PortfolioMetadata{
+				PurchasedValue: asInt(vals, 1),
+				AssetCount:     asInt(vals, 2),
+				UserID:         asString(vals, 3),
+				CurrentValue:   currentValue,
+			},
+		}
 	}
 	opResult = metrics.ResultSuccess
 	return out, nil
@@ -306,6 +372,7 @@ func (s *Store) DecreaseStockQuantity(ctx context.Context, stockID, portfolioID 
 	if neu.Sign() <= 0 {
 		pipe := s.rdb.Pipeline()
 		pipe.Del(ctx, quantityKey(portfolioID, stockID), currentValueKey(portfolioID, stockID))
+		pipe.HDel(ctx, pfKey(portfolioID), stockCurrentValueField(stockID))
 		pipe.SRem(ctx, stockPortfoliosKey(stockID), strconv.FormatInt(portfolioID, 10))
 		pipe.SRem(ctx, portfolioStocksKey(portfolioID), strconv.FormatInt(stockID, 10))
 		_, err := pipe.Exec(ctx)
@@ -325,16 +392,42 @@ func (s *Store) AddPortfolioCurrentValue(ctx context.Context, id int64, amount d
 func (s *Store) SubtractPortfolioCurrentValue(ctx context.Context, id int64, amount decimal.Decimal) error {
 	return s.rdb.HIncrByFloat(ctx, pfKey(id), fCVP, -toFloat(amount)).Err()
 }
+
+const adjustStockCurrentValueScript = `
+local current = redis.call('HGET', KEYS[1], ARGV[1])
+if not current then
+    current = ARGV[3]
+    redis.call('HSET', KEYS[1], ARGV[1], current)
+end
+
+local updated = redis.call('HINCRBYFLOAT', KEYS[1], ARGV[1], ARGV[2])
+if ARGV[4] == '1' and tonumber(updated) <= 0 then
+    redis.call('HDEL', KEYS[1], ARGV[1])
+    return '0'
+end
+return updated
+`
+
 func (s *Store) AddStockCurrentValue(ctx context.Context, stockID, portfolioID int64, amount decimal.Decimal) error {
-	v := s.getDec(ctx, currentValueKey(portfolioID, stockID)).Add(amount)
-	return s.rdb.Set(ctx, currentValueKey(portfolioID, stockID), v.String(), 0).Err()
+	legacyCurrent := s.getDec(ctx, currentValueKey(portfolioID, stockID))
+	updated, err := s.rdb.Eval(ctx, adjustStockCurrentValueScript, []string{pfKey(portfolioID)},
+		stockCurrentValueField(stockID), amount.String(), legacyCurrent.String(), "0").Text()
+	if err != nil {
+		return err
+	}
+	return s.rdb.Set(ctx, currentValueKey(portfolioID, stockID), updated, 0).Err()
 }
 func (s *Store) SubtractStockCurrentValue(ctx context.Context, stockID, portfolioID int64, amount decimal.Decimal) error {
-	v := s.getDec(ctx, currentValueKey(portfolioID, stockID)).Sub(amount)
-	if v.Sign() <= 0 {
+	legacyCurrent := s.getDec(ctx, currentValueKey(portfolioID, stockID))
+	updated, err := s.rdb.Eval(ctx, adjustStockCurrentValueScript, []string{pfKey(portfolioID)},
+		stockCurrentValueField(stockID), amount.Neg().String(), legacyCurrent.String(), "1").Text()
+	if err != nil {
+		return err
+	}
+	if updated == "0" {
 		return s.rdb.Del(ctx, currentValueKey(portfolioID, stockID)).Err()
 	}
-	return s.rdb.Set(ctx, currentValueKey(portfolioID, stockID), v.String(), 0).Err()
+	return s.rdb.Set(ctx, currentValueKey(portfolioID, stockID), updated, 0).Err()
 }
 func (s *Store) IncreaseAssetCount(ctx context.Context, id int64) error {
 	return s.rdb.HIncrBy(ctx, pfKey(id), fAC, 1).Err()
@@ -348,6 +441,7 @@ func (s *Store) DeletePortfolioState(ctx context.Context, id int64) error {
 	for _, stock := range stocks {
 		sid, _ := strconv.ParseInt(stock, 10, 64)
 		pipe.Del(ctx, quantityKey(id, sid), currentValueKey(id, sid))
+		pipe.HDel(ctx, pfKey(id), stockCurrentValueField(sid))
 		pipe.SRem(ctx, stockPortfoliosKey(sid), strconv.FormatInt(id, 10))
 	}
 	pipe.Del(ctx, portfolioStocksKey(id))

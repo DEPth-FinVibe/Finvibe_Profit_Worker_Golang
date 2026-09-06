@@ -58,7 +58,7 @@ func (s *ProfitService) UpdateProfitsByStockPriceChanges(ctx context.Context, re
 	}
 	s.metrics.ObservePhase(metrics.OpStockRecalc, "bulk_prefetch", metrics.ResultSuccess, phase)
 	phase = time.Now()
-	portfolioDelta := make(map[int64]decimal.Decimal)
+	replacements := make(map[int64][]redisstore.StockCurrentValueReplacement)
 	stockCV := make(map[string]decimal.Decimal)
 	for _, t := range tasks {
 		h := holdings[model.StockHoldingKey{PortfolioID: t.portfolioID, StockID: t.stockID}.String()]
@@ -66,21 +66,24 @@ func (s *ProfitService) UpdateProfitsByStockPriceChanges(ctx context.Context, re
 			continue
 		}
 		newCV := decimal.NewFromInt(t.newPrice).Mul(h.Quantity)
-		delta := newCV.Sub(h.CurrentValue)
-		if old, ok := portfolioDelta[t.portfolioID]; ok {
-			portfolioDelta[t.portfolioID] = old.Add(delta)
-		} else {
-			portfolioDelta[t.portfolioID] = delta
-		}
+		replacements[t.portfolioID] = append(replacements[t.portfolioID], redisstore.StockCurrentValueReplacement{
+			StockID:       t.stockID,
+			PreviousValue: h.CurrentValue,
+			CurrentValue:  newCV,
+		})
 		stockCV[s.store.StockCurrentValueKey(t.portfolioID, t.stockID)] = newCV
 	}
 	s.metrics.ObservePhase(metrics.OpStockRecalc, "in_memory_compute", metrics.ResultSuccess, phase)
+	if len(replacements) == 0 {
+		result = metrics.ResultSuccess
+		return nil
+	}
 	phase = time.Now()
-	states, err := s.store.BulkIncrementPortfolioCurrentValuesAndFetchMetadata(ctx, portfolioDelta)
+	states, err := s.store.BulkReplaceStockCurrentValuesAndFetchMetadata(ctx, replacements)
 	if err != nil {
 		return err
 	}
-	s.metrics.ObservePhase(metrics.OpStockRecalc, "pipeline_portfolio_incr", metrics.ResultSuccess, phase)
+	s.metrics.ObservePhase(metrics.OpStockRecalc, "atomic_stock_cv_replace", metrics.ResultSuccess, phase)
 	phase = time.Now()
 	if len(stockCV) > 0 {
 		if err := s.store.BulkSetStockCurrentValues(ctx, stockCV); err != nil {
@@ -89,8 +92,8 @@ func (s *ProfitService) UpdateProfitsByStockPriceChanges(ctx context.Context, re
 	}
 	s.metrics.ObservePhase(metrics.OpStockRecalc, "pipeline_stock_cv_set", metrics.ResultSuccess, phase)
 	phase = time.Now()
-	vals := make([]model.PortfolioValuation, 0, len(portfolioDelta))
-	for pf := range portfolioDelta {
+	vals := make([]model.PortfolioValuation, 0, len(replacements))
+	for pf := range replacements {
 		st := states[pf]
 		vals = append(vals, model.PortfolioValuation{
 			PortfolioID:    pf,
@@ -108,7 +111,7 @@ func (s *ProfitService) UpdateProfitsByStockPriceChanges(ctx context.Context, re
 
 	phase = time.Now()
 	affectedUsers := make(map[string]struct{})
-	for portfolioID := range portfolioDelta {
+	for portfolioID := range replacements {
 		userID := states[portfolioID].Metadata.UserID
 		if userID == "" {
 			continue
