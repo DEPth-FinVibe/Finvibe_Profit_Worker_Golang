@@ -4,7 +4,7 @@
 
 - 작성일: 2026-09-06
 - 기준 문서: `01-overview.md`, `02-plan.md`
-- 상태: 진행 중
+- 상태: 완료
 - 리뷰 상태: 리뷰 필요
 
 ## D1. Go 워커의 복구 데이터 원본
@@ -41,7 +41,7 @@ Batch 서버에는 DB 기준으로 포트폴리오 소유자, 보유 자산 snap
 
 ### 감수한 트레이드오프와 연동 전제
 
-- DLT backlog에는 현재 상태보다 오래된 가격이 포함될 수 있으므로 D4의 최신성 판정이 적용되기 전에는 배포하지 않는다.
+- DLT backlog 보호를 위해 D4 최신성 판정과 같은 release로 배포한다.
 - 중복 또는 중간 실패 재처리는 D2의 원자적 평가액 갱신으로 보호한다.
 - 시스템 전체의 주기적 가격·평가액 검증은 병렬로 진행하는 Batch reconciliation이 담당한다.
 - 두 작업의 Redis key와 최신성 계약은 최종 통합 검증에서 함께 확인해야 한다.
@@ -96,7 +96,7 @@ Batch 서버에는 DB 기준으로 포트폴리오 소유자, 보유 자산 snap
 
 - 원자 갱신 기준은 `pf:<portfolioId>`의 `scv:<stockId>`와 `cvp`이다.
 - 기존 종목별 current-value key는 호환용 projection으로 함께 보정한다.
-- 가격 최신성 비교에 사용하는 Redis field와 동일 시각 규칙은 D4 결정 후 확정한다.
+- 최신성 비교는 `stock:{<stockId>}:price-application`의 `at`, `price`를 사용한다.
 
 ## D4. 최신성 판정 규칙
 
@@ -126,7 +126,7 @@ Batch 서버에는 DB 기준으로 포트폴리오 소유자, 보유 자산 snap
 ### 실패 및 동시성 규칙
 
 - 기본 topic과 DLT는 같은 종목 lock과 적용 상태를 사용한다.
-- 여러 종목의 lock은 stock ID 오름차순으로 획득하고 경합 시 전체 Kafka batch를 재시도한다.
+- 여러 종목의 lock은 stock ID로 정렬한 뒤 한 Redis pipeline으로 요청하고, 하나라도 경합하면 획득분을 해제한 뒤 전체 Kafka batch를 재시도한다.
 - 처리 중 lock TTL을 주기적으로 갱신한다.
 - 전체 평가액 fan-out 성공 후 적용 상태 저장과 lock 해제를 Lua로 원자 처리한다.
 - fan-out 중 실패하면 적용 상태를 확정하지 않아 Kafka 재처리가 다시 수행된다.
