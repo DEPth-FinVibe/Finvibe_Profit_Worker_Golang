@@ -215,10 +215,24 @@ func (c *Consumers) handleStockMessages(ctx context.Context, msgs []message, eve
 			c.recordMany(eventType, metrics.ResultFailure, len(msgs))
 			return err
 		}
-		if _, seen := latest[ev.StockID]; !seen {
+		current, seen := latest[ev.StockID]
+		if !seen {
 			order = append(order, ev.StockID)
+			latest[ev.StockID] = ev
+			continue
 		}
-		latest[ev.StockID] = ev
+		switch {
+		case ev.UpdatedAt.After(current.UpdatedAt.Time):
+			c.metrics.RecordSkipped(eventType, metrics.ReasonStalePriceEvent)
+			latest[ev.StockID] = ev
+		case ev.UpdatedAt.Before(current.UpdatedAt.Time):
+			c.metrics.RecordSkipped(eventType, metrics.ReasonStalePriceEvent)
+		case ev.Price.Equal(current.Price.Decimal):
+			c.metrics.RecordSkipped(eventType, metrics.ReasonDuplicatePriceEvent)
+		default:
+			c.metrics.RecordSkipped(eventType, metrics.ReasonPriceTimestampConflict)
+			slog.Warn("stock price timestamp conflict in batch", "event_type", eventType, "stock_id", ev.StockID, "updated_at", ev.UpdatedAt.Time)
+		}
 	}
 	c.metrics.RecordBatch(eventType, len(msgs), len(latest))
 	reqs := make([]model.ProfitCalculationRequest, 0, len(latest))
@@ -232,9 +246,15 @@ func (c *Consumers) handleStockMessages(ctx context.Context, msgs []message, eve
 		c.metrics.RecordAge(eventType, time.Since(ev.UpdatedAt.Time))
 		reqs = append(reqs, model.ProfitCalculationRequest{StockID: ev.StockID, NewPrice: price, Timestamp: ev.UpdatedAt.Time})
 	}
-	if err := c.profit.UpdateProfitsByStockPriceChanges(ctx, reqs); err != nil {
+	outcome, err := c.profit.UpdateProfitsByStockPriceChanges(ctx, reqs)
+	if err != nil {
 		c.recordMany(eventType, metrics.ResultFailure, len(reqs))
 		return err
+	}
+	for reason, count := range outcome.Skipped {
+		for i := 0; i < count; i++ {
+			c.metrics.RecordSkipped(eventType, reason)
+		}
 	}
 	c.recordMany(eventType, metrics.ResultSuccess, len(reqs))
 	result = metrics.ResultSuccess

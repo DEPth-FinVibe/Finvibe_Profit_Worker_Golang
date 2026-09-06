@@ -31,6 +31,7 @@ type Config struct {
 	KafkaGroupProtocol       string
 	MaxPollRecords           int
 	BatchMaxWait             time.Duration
+	PriceApplicationLockTTL  time.Duration
 	ShutdownTimeout          time.Duration
 }
 
@@ -59,6 +60,7 @@ func Load() Config {
 		KafkaGroupProtocol:       getenv("KAFKA_GROUP_PROTOCOL", "consumer"),
 		MaxPollRecords:           getint("KAFKA_MAX_POLL_RECORDS", 100),
 		BatchMaxWait:             time.Duration(getint("KAFKA_BATCH_MAX_WAIT_MS", 50)) * time.Millisecond,
+		PriceApplicationLockTTL:  time.Duration(getint("PRICE_APPLICATION_LOCK_TTL_SECONDS", 30)) * time.Second,
 		ShutdownTimeout:          time.Duration(getint("SHUTDOWN_TIMEOUT_SECONDS", 20)) * time.Second,
 	}
 }

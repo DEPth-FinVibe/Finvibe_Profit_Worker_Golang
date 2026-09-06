@@ -97,3 +97,44 @@ Batch 서버에는 DB 기준으로 포트폴리오 소유자, 보유 자산 snap
 - 원자 갱신 기준은 `pf:<portfolioId>`의 `scv:<stockId>`와 `cvp`이다.
 - 기존 종목별 current-value key는 호환용 projection으로 함께 보정한다.
 - 가격 최신성 비교에 사용하는 Redis field와 동일 시각 규칙은 D4 결정 후 확정한다.
+
+## D4. 최신성 판정 규칙
+
+### 검토한 선택지
+
+1. `updatedAt`을 우선 비교하고 동일 시각 충돌은 기존 확정 값을 유지
+2. 가격이 다르면 수신 순서대로 항상 적용
+3. Kafka partition과 offset으로 비교
+
+### 결정
+
+- 사용자 선택: **1번 `updatedAt` 기준**
+- 저장된 시각보다 최신인 이벤트만 평가액 fan-out을 수행한다.
+- 동일 시각·동일 가격은 정상 중복으로 skip한다.
+- 이전 시각 이벤트는 stale로 skip한다.
+- 동일 시각·다른 가격은 충돌 metric과 경고 로그를 남기고 평가액을 변경하지 않는다.
+- Batch reconciliation은 authoritative 가격을 기준으로 동일 시각 충돌을 확정할 수 있다.
+
+### Redis 계약
+
+- 적용 상태 key: `stock:{<stockId>}:price-application`
+- 적용 상태 field: `at`은 UTC RFC3339Nano, `price`는 정수 가격
+- 적용 lock key: `stock:{<stockId>}:price-application-lock`
+- 두 key는 같은 Redis Cluster hash tag를 사용한다.
+- lock TTL 기본값은 30초이며 `PRICE_APPLICATION_LOCK_TTL_SECONDS`로 조정한다.
+
+### 실패 및 동시성 규칙
+
+- 기본 topic과 DLT는 같은 종목 lock과 적용 상태를 사용한다.
+- 여러 종목의 lock은 stock ID 오름차순으로 획득하고 경합 시 전체 Kafka batch를 재시도한다.
+- 처리 중 lock TTL을 주기적으로 갱신한다.
+- 전체 평가액 fan-out 성공 후 적용 상태 저장과 lock 해제를 Lua로 원자 처리한다.
+- fan-out 중 실패하면 적용 상태를 확정하지 않아 Kafka 재처리가 다시 수행된다.
+- lock 소유권을 잃으면 적용 상태를 확정하지 않는다.
+
+### 근거와 트레이드오프
+
+- 기본 topic과 DLT에 공통으로 있는 `updatedAt`을 사용해 오래된 backlog의 롤백을 막는다.
+- offset에 의존하지 않아 Batch reconciliation과 동일한 최신성 계약을 사용할 수 있다.
+- lock 경합 시 해당 Kafka batch 처리 지연이 생길 수 있지만 상태 순서를 우선한다.
+- 같은 시각의 서로 다른 가격은 Go 워커가 임의로 선택하지 않아 결정 결과가 수신 순서에 좌우되지 않는다.

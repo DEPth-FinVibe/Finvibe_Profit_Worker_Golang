@@ -19,7 +19,10 @@ const (
 	EventTrade         = "portfolio_trade"
 	EventPortfolioUser = "portfolio_user"
 
-	ReasonUpdatedEventIgnored = "updated_event_ignored"
+	ReasonUpdatedEventIgnored    = "updated_event_ignored"
+	ReasonStalePriceEvent        = "stale_price_event"
+	ReasonDuplicatePriceEvent    = "duplicate_price_event"
+	ReasonPriceTimestampConflict = "price_timestamp_conflict"
 
 	OpStockRecalc        = "stock_price_recalculation"
 	OpPortfolioCache     = "portfolio_cache_update"

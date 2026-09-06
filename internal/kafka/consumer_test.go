@@ -3,6 +3,7 @@ package kafka
 import (
 	"context"
 	"testing"
+	"time"
 
 	"finvibe-profit-worker-go/internal/config"
 	"finvibe-profit-worker-go/internal/metrics"
@@ -60,7 +61,7 @@ func TestStockPriceDLTUsesProfitCalculationPath(t *testing.T) {
 	rdb := redis.NewClient(&redis.Options{Addr: mr.Addr()})
 	m := metrics.New(prometheus.NewRegistry())
 	store := redisstore.New(rdb, m)
-	profit := service.NewProfitService(store, m)
+	profit := service.NewProfitService(store, m, 30*time.Second)
 	consumers := New(config.Config{}, profit, nil, m)
 
 	if err := rdb.SAdd(ctx, "stock:10:portfolios", "100").Err(); err != nil {
@@ -95,5 +96,39 @@ func TestStockPriceDLTUsesProfitCalculationPath(t *testing.T) {
 	}
 	if got := mr.HGet("usr:7", "cvp"); got != "360" {
 		t.Fatalf("user current value got %q", got)
+	}
+}
+
+func TestStockBatchSelectsNewestTimestampInsteadOfLastMessage(t *testing.T) {
+	ctx := context.Background()
+	mr := miniredis.RunT(t)
+	rdb := redis.NewClient(&redis.Options{Addr: mr.Addr()})
+	m := metrics.New(prometheus.NewRegistry())
+	store := redisstore.New(rdb, m)
+	profit := service.NewProfitService(store, m, 30*time.Second)
+	consumers := New(config.Config{}, profit, nil, m)
+
+	if err := rdb.SAdd(ctx, "stock:10:portfolios", "100").Err(); err != nil {
+		t.Fatal(err)
+	}
+	if err := rdb.Set(ctx, "portfolio:100:stock:10:quantity", "3", 0).Err(); err != nil {
+		t.Fatal(err)
+	}
+	if err := rdb.Set(ctx, "portfolio:100:stock:10:current-value", "300", 0).Err(); err != nil {
+		t.Fatal(err)
+	}
+	if err := rdb.HSet(ctx, "pf:100", map[string]any{"pv": "240", "cvp": "300", "ac": "1"}).Err(); err != nil {
+		t.Fatal(err)
+	}
+
+	err := consumers.handleStock(ctx, []message{
+		{value: []byte(`{"stockId":10,"price":120,"updatedAt":"2026-09-06T09:00:01Z"}`)},
+		{value: []byte(`{"stockId":10,"price":90,"updatedAt":"2026-09-06T09:00:00Z"}`)},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := mr.HGet("pf:100", "cvp"); got != "360" {
+		t.Fatalf("portfolio current value got %q", got)
 	}
 }

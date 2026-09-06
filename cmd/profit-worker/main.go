@@ -31,7 +31,7 @@ func main() {
 	go m.RunPeriodicDump(ctx)
 	rdb := newRedisClient(cfg)
 	store := redisstore.New(rdb, m)
-	profit := service.NewProfitService(store, m)
+	profit := service.NewProfitService(store, m, cfg.PriceApplicationLockTTL)
 	cache := service.NewCacheService(store, m)
 	consumers := kconsumer.New(cfg, profit, cache, m)
 	mux := http.NewServeMux()

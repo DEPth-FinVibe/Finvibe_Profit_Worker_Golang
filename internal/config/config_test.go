@@ -1,6 +1,9 @@
 package config
 
-import "testing"
+import (
+	"testing"
+	"time"
+)
 
 func TestLoadStockPriceDLTDefaults(t *testing.T) {
 	t.Setenv("KAFKA_TOPIC_STOCK_PRICE_UPDATED_DLT", "")
@@ -43,5 +46,15 @@ func TestLoadStockPriceDLTOverrides(t *testing.T) {
 	}
 	if cfg.StockDLTEnabled {
 		t.Fatal("StockDLTEnabled got true")
+	}
+}
+
+func TestLoadPriceApplicationLockTTL(t *testing.T) {
+	t.Setenv("PRICE_APPLICATION_LOCK_TTL_SECONDS", "45")
+
+	cfg := Load()
+
+	if cfg.PriceApplicationLockTTL != 45*time.Second {
+		t.Fatalf("PriceApplicationLockTTL got %s", cfg.PriceApplicationLockTTL)
 	}
 }
