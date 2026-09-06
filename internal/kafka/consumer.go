@@ -33,9 +33,12 @@ func New(cfg config.Config, p *service.ProfitService, c *service.CacheService, m
 }
 
 func (c *Consumers) Run(ctx context.Context) {
-	c.runGroup(ctx, c.cfg.StockConcurrency, c.cfg.StockTopic, c.cfg.StockGroup, c.handleStock)
-	c.runGroup(ctx, c.cfg.TradeConcurrency, c.cfg.TradeTopic, c.cfg.TradeGroup, c.handleTrade)
-	c.runGroup(ctx, c.cfg.PortfolioUserConcurrency, c.cfg.PortfolioUserTopic, c.cfg.PortfolioUserGroup, c.handlePortfolioUser)
+	c.runGroup(ctx, c.cfg.StockConcurrency, c.cfg.StockTopic, c.cfg.StockGroup, "latest", c.handleStock)
+	if c.cfg.StockDLTEnabled {
+		c.runGroup(ctx, c.cfg.StockDLTConcurrency, c.cfg.StockDLTTopic, c.cfg.StockDLTGroup, "earliest", c.handleStockDLT)
+	}
+	c.runGroup(ctx, c.cfg.TradeConcurrency, c.cfg.TradeTopic, c.cfg.TradeGroup, "latest", c.handleTrade)
+	c.runGroup(ctx, c.cfg.PortfolioUserConcurrency, c.cfg.PortfolioUserTopic, c.cfg.PortfolioUserGroup, "latest", c.handlePortfolioUser)
 }
 
 func (c *Consumers) Ready() bool {
@@ -47,7 +50,11 @@ func (c *Consumers) ActiveWorkers() int64 {
 }
 
 func (c *Consumers) RequiredWorkers() int64 {
-	return int64(normalizeConcurrency(c.cfg.StockConcurrency) + normalizeConcurrency(c.cfg.TradeConcurrency) + normalizeConcurrency(c.cfg.PortfolioUserConcurrency))
+	required := normalizeConcurrency(c.cfg.StockConcurrency) + normalizeConcurrency(c.cfg.TradeConcurrency) + normalizeConcurrency(c.cfg.PortfolioUserConcurrency)
+	if c.cfg.StockDLTEnabled {
+		required += normalizeConcurrency(c.cfg.StockDLTConcurrency)
+	}
+	return int64(required)
 }
 
 func normalizeConcurrency(n int) int {
@@ -57,11 +64,11 @@ func normalizeConcurrency(n int) int {
 	return n
 }
 
-func (c *Consumers) runGroup(ctx context.Context, n int, topic, group string, handler func(context.Context, []message) error) {
+func (c *Consumers) runGroup(ctx context.Context, n int, topic, group, offsetReset string, handler func(context.Context, []message) error) {
 	n = normalizeConcurrency(n)
 	for i := 0; i < n; i++ {
 		go func(worker int) {
-			consumer, err := c.newConsumer(group)
+			consumer, err := c.newConsumer(group, offsetReset)
 			if err != nil {
 				slog.Error("kafka consumer create", "topic", topic, "group", group, "err", err)
 				return
@@ -120,18 +127,26 @@ func (c *Consumers) runGroup(ctx context.Context, n int, topic, group string, ha
 	}
 }
 
-func (c *Consumers) newConsumer(group string) (*ckafka.Consumer, error) {
+func (c *Consumers) newConsumer(group, offsetReset string) (*ckafka.Consumer, error) {
+	cfg := c.consumerConfig(group, offsetReset)
+	return ckafka.NewConsumer(cfg)
+}
+
+func (c *Consumers) consumerConfig(group, offsetReset string) *ckafka.ConfigMap {
+	if offsetReset == "" {
+		offsetReset = "latest"
+	}
 	cfg := &ckafka.ConfigMap{
 		"bootstrap.servers":        strings.Join(c.cfg.KafkaBrokers, ","),
 		"group.id":                 group,
-		"auto.offset.reset":        "latest",
+		"auto.offset.reset":        offsetReset,
 		"enable.auto.commit":       false,
 		"enable.auto.offset.store": false,
 	}
 	if c.cfg.KafkaGroupProtocol != "" {
 		_ = cfg.SetKey("group.protocol", c.cfg.KafkaGroupProtocol)
 	}
-	return ckafka.NewConsumer(cfg)
+	return cfg
 }
 
 func (c *Consumers) fetchBatch(ctx context.Context, consumer *ckafka.Consumer) ([]message, error) {
@@ -181,15 +196,23 @@ func (c *Consumers) fetchBatch(ctx context.Context, consumer *ckafka.Consumer) (
 }
 
 func (c *Consumers) handleStock(ctx context.Context, msgs []message) error {
+	return c.handleStockMessages(ctx, msgs, metrics.EventStockPrice)
+}
+
+func (c *Consumers) handleStockDLT(ctx context.Context, msgs []message) error {
+	return c.handleStockMessages(ctx, msgs, metrics.EventStockPriceDLT)
+}
+
+func (c *Consumers) handleStockMessages(ctx context.Context, msgs []message, eventType string) error {
 	start := time.Now()
 	result := metrics.ResultFailure
-	defer func() { c.metrics.ObserveListener(metrics.EventStockPrice, result, start) }()
+	defer func() { c.metrics.ObserveListener(eventType, result, start) }()
 	latest := map[int64]model.StockPriceUpdatedEvent{}
 	order := make([]int64, 0, len(msgs))
 	for _, m := range msgs {
 		ev, err := model.Decode[model.StockPriceUpdatedEvent](m.value)
 		if err != nil {
-			c.recordMany(metrics.EventStockPrice, metrics.ResultFailure, len(msgs))
+			c.recordMany(eventType, metrics.ResultFailure, len(msgs))
 			return err
 		}
 		if _, seen := latest[ev.StockID]; !seen {
@@ -197,23 +220,23 @@ func (c *Consumers) handleStock(ctx context.Context, msgs []message) error {
 		}
 		latest[ev.StockID] = ev
 	}
-	c.metrics.RecordBatch(metrics.EventStockPrice, len(msgs), len(latest))
+	c.metrics.RecordBatch(eventType, len(msgs), len(latest))
 	reqs := make([]model.ProfitCalculationRequest, 0, len(latest))
 	for _, id := range order {
 		ev := latest[id]
 		price, err := ev.Price.Int64Exact()
 		if err != nil {
-			c.recordMany(metrics.EventStockPrice, metrics.ResultFailure, len(latest))
+			c.recordMany(eventType, metrics.ResultFailure, len(latest))
 			return err
 		}
-		c.metrics.RecordAge(metrics.EventStockPrice, time.Since(ev.UpdatedAt.Time))
+		c.metrics.RecordAge(eventType, time.Since(ev.UpdatedAt.Time))
 		reqs = append(reqs, model.ProfitCalculationRequest{StockID: ev.StockID, NewPrice: price, Timestamp: ev.UpdatedAt.Time})
 	}
 	if err := c.profit.UpdateProfitsByStockPriceChanges(ctx, reqs); err != nil {
-		c.recordMany(metrics.EventStockPrice, metrics.ResultFailure, len(reqs))
+		c.recordMany(eventType, metrics.ResultFailure, len(reqs))
 		return err
 	}
-	c.recordMany(metrics.EventStockPrice, metrics.ResultSuccess, len(reqs))
+	c.recordMany(eventType, metrics.ResultSuccess, len(reqs))
 	result = metrics.ResultSuccess
 	return nil
 }

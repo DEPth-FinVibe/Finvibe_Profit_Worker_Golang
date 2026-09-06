@@ -16,12 +16,16 @@ type Config struct {
 	RedisDB                  int
 	KafkaBrokers             []string
 	StockTopic               string
+	StockDLTTopic            string
 	TradeTopic               string
 	PortfolioUserTopic       string
 	StockGroup               string
+	StockDLTGroup            string
 	TradeGroup               string
 	PortfolioUserGroup       string
 	StockConcurrency         int
+	StockDLTConcurrency      int
+	StockDLTEnabled          bool
 	TradeConcurrency         int
 	PortfolioUserConcurrency int
 	KafkaGroupProtocol       string
@@ -40,12 +44,16 @@ func Load() Config {
 		RedisDB:                  getint("REDIS_DB", 0),
 		KafkaBrokers:             split(getenv("KAFKA_BOOTSTRAP_SERVERS", "localhost:9092")),
 		StockTopic:               getenv("KAFKA_TOPIC_STOCK_PRICE_UPDATED", "market.stock-price-updated.v1"),
+		StockDLTTopic:            getenv("KAFKA_TOPIC_STOCK_PRICE_UPDATED_DLT", "market.stock-price-updated.v1.DLT"),
 		TradeTopic:               getenv("KAFKA_TOPIC_PORTFOLIO_TRADE", "trade.trade-executed.v1"),
 		PortfolioUserTopic:       getenv("KAFKA_TOPIC_PORTFOLIO_USER", "asset.portfolio-group-changed.v1"),
 		StockGroup:               getenv("KAFKA_GROUP_STOCK_PRICE", "profit-worker-price"),
+		StockDLTGroup:            getenv("KAFKA_GROUP_STOCK_PRICE_DLT", "profit-worker-price-dlt"),
 		TradeGroup:               getenv("KAFKA_GROUP_TRADE", "profit-worker-trade"),
 		PortfolioUserGroup:       getenv("KAFKA_GROUP_PORTFOLIO", "profit-worker-portfolio"),
 		StockConcurrency:         getint("KAFKA_CONCURRENCY_STOCK_PRICE", 2),
+		StockDLTConcurrency:      getint("KAFKA_CONCURRENCY_STOCK_PRICE_DLT", 1),
+		StockDLTEnabled:          getbool("KAFKA_STOCK_PRICE_DLT_ENABLED", true),
 		TradeConcurrency:         getint("KAFKA_CONCURRENCY_TRADE", 1),
 		PortfolioUserConcurrency: getint("KAFKA_CONCURRENCY_PORTFOLIO", 1),
 		KafkaGroupProtocol:       getenv("KAFKA_GROUP_PROTOCOL", "consumer"),
@@ -66,6 +74,17 @@ func getint(k string, d int) int {
 		return v
 	}
 	return d
+}
+func getbool(k string, d bool) bool {
+	v := strings.TrimSpace(os.Getenv(k))
+	if v == "" {
+		return d
+	}
+	parsed, err := strconv.ParseBool(v)
+	if err != nil {
+		return d
+	}
+	return parsed
 }
 func split(s string) []string {
 	parts := strings.Split(s, ",")

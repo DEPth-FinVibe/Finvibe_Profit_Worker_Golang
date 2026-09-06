@@ -15,6 +15,7 @@ const (
 	ResultSkipped = "skipped"
 
 	EventStockPrice    = "stock_price_updated"
+	EventStockPriceDLT = "stock_price_updated_dlt"
 	EventTrade         = "portfolio_trade"
 	EventPortfolioUser = "portfolio_user"
 
