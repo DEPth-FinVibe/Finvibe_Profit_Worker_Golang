@@ -27,7 +27,7 @@ Batch 서버에는 DB 기준으로 포트폴리오 소유자, 보유 자산 snap
 
 - 사용자 선택: **2번 Kafka DLT 소비**
 - Go 워커는 `market.stock-price-updated.v1.DLT`를 별도 consumer group으로 소비한다.
-- 신규 DLT group은 기존 backlog도 처리할 수 있도록 최초 offset reset을 `earliest`로 설정한다.
+- 신규 DLT group의 최초 offset 정책은 D5에서 `latest`로 확정한다.
 - DLT consumer는 기본 가격 consumer와 같은 수익률 계산 진입점을 사용한다.
 - DLT 처리량과 성공·실패는 기본 가격 이벤트와 구분해 metric에 기록한다.
 - DLT 소비 활성화와 concurrency는 환경변수로 조정할 수 있게 한다.
@@ -41,7 +41,7 @@ Batch 서버에는 DB 기준으로 포트폴리오 소유자, 보유 자산 snap
 
 ### 감수한 트레이드오프와 연동 전제
 
-- DLT backlog 보호를 위해 D4 최신성 판정과 같은 release로 배포한다.
+- 배포 이후 늦게 처리되는 DLT 이벤트는 D4 최신성 판정으로 보호한다.
 - 중복 또는 중간 실패 재처리는 D2의 원자적 평가액 갱신으로 보호한다.
 - 시스템 전체의 주기적 가격·평가액 검증은 병렬로 진행하는 Batch reconciliation이 담당한다.
 - 두 작업의 Redis key와 최신성 계약은 최종 통합 검증에서 함께 확인해야 한다.
@@ -138,3 +138,25 @@ Batch 서버에는 DB 기준으로 포트폴리오 소유자, 보유 자산 snap
 - offset에 의존하지 않아 Batch reconciliation과 동일한 최신성 계약을 사용할 수 있다.
 - lock 경합 시 해당 Kafka batch 처리 지연이 생길 수 있지만 상태 순서를 우선한다.
 - 같은 시각의 서로 다른 가격은 Go 워커가 임의로 선택하지 않아 결정 결과가 수신 순서에 좌우되지 않는다.
+
+## D5. 최초 DLT 활성화 정책
+
+### 검토한 선택지
+
+1. DLT를 기본 비활성화하고 Batch가 적용 상태를 bootstrap한 뒤 활성화
+2. DLT를 기본 활성화하고 최초 offset을 `latest`로 설정
+3. DLT를 기본 활성화하고 최초 offset을 `earliest`로 설정
+
+### 결정
+
+- 사용자 선택: **2번 기본 활성화 + `latest`**
+- `KAFKA_STOCK_PRICE_DLT_ENABLED` 기본값은 `true`로 유지한다.
+- 신규 `profit-worker-price-dlt` group에 committed offset이 없으면 log end 이후 이벤트부터 처리한다.
+- 기존 DLT backlog는 재생하지 않고 배포 이후 격리되는 이벤트를 빠르게 복구한다.
+
+### 근거와 트레이드오프
+
+- 적용 상태가 없는 최초 배포에서 과거 DLT 이벤트가 현재 평가액을 과거 가격으로 변경하는 상황을 피한다.
+- 별도 bootstrap이나 Manifest 선행 변경 없이 Go worker 배포만으로 활성화된다.
+- 최초 group 생성 전에 쌓인 DLT 이벤트는 이 consumer가 처리하지 않는다.
+- 이미 committed offset이 있는 동일 group은 Kafka의 기존 offset에서 이어서 처리한다.

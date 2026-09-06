@@ -28,6 +28,8 @@ type message struct {
 	raw   *ckafka.Message
 }
 
+const stockPriceDLTOffsetReset = "latest"
+
 func New(cfg config.Config, p *service.ProfitService, c *service.CacheService, m *metrics.Metrics) *Consumers {
 	return &Consumers{cfg: cfg, profit: p, cache: c, metrics: m}
 }
@@ -35,7 +37,7 @@ func New(cfg config.Config, p *service.ProfitService, c *service.CacheService, m
 func (c *Consumers) Run(ctx context.Context) {
 	c.runGroup(ctx, c.cfg.StockConcurrency, c.cfg.StockTopic, c.cfg.StockGroup, "latest", c.handleStock)
 	if c.cfg.StockDLTEnabled {
-		c.runGroup(ctx, c.cfg.StockDLTConcurrency, c.cfg.StockDLTTopic, c.cfg.StockDLTGroup, "earliest", c.handleStockDLT)
+		c.runGroup(ctx, c.cfg.StockDLTConcurrency, c.cfg.StockDLTTopic, c.cfg.StockDLTGroup, stockPriceDLTOffsetReset, c.handleStockDLT)
 	}
 	c.runGroup(ctx, c.cfg.TradeConcurrency, c.cfg.TradeTopic, c.cfg.TradeGroup, "latest", c.handleTrade)
 	c.runGroup(ctx, c.cfg.PortfolioUserConcurrency, c.cfg.PortfolioUserTopic, c.cfg.PortfolioUserGroup, "latest", c.handlePortfolioUser)

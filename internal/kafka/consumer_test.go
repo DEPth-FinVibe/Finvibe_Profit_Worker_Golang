@@ -42,13 +42,13 @@ func TestRequiredWorkersExcludesDisabledStockPriceDLT(t *testing.T) {
 	}
 }
 
-func TestConsumerConfigUsesRequestedOffsetReset(t *testing.T) {
+func TestStockPriceDLTStartsAtLatestOffset(t *testing.T) {
 	consumers := &Consumers{cfg: config.Config{KafkaBrokers: []string{"kafka:9092"}}}
 
-	cfg := consumers.consumerConfig("profit-worker-price-dlt", "earliest")
+	cfg := consumers.consumerConfig("profit-worker-price-dlt", stockPriceDLTOffsetReset)
 
-	if got := (*cfg)["auto.offset.reset"]; got != "earliest" {
-		t.Fatalf("auto.offset.reset got %v want earliest", got)
+	if got := (*cfg)["auto.offset.reset"]; got != "latest" {
+		t.Fatalf("auto.offset.reset got %v want latest", got)
 	}
 	if got := (*cfg)["group.id"]; got != "profit-worker-price-dlt" {
 		t.Fatalf("group.id got %v", got)

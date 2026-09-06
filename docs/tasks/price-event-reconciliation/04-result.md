@@ -18,7 +18,7 @@ Go 수익률 워커에 가격 DLT 빠른 복구, 재시도 안전한 평가액 �
 ### Kafka DLT 처리
 
 - `market.stock-price-updated.v1.DLT`를 별도 consumer group으로 소비한다.
-- 최초 offset이 없으면 `earliest`부터 backlog를 처리한다.
+- 최초 offset이 없으면 `latest`에서 시작해 배포 이후 DLT 이벤트를 처리한다.
 - 기본 가격 이벤트와 같은 수익률 계산 경로를 사용한다.
 - DLT worker도 readiness의 필수 worker 수에 포함한다.
 - DLT listener·처리량·지연·skip 지표를 기본 topic과 구분한다.
@@ -100,7 +100,7 @@ Go 수익률 워커에 가격 DLT 빠른 복구, 재시도 안전한 평가액 �
 ## 배포 및 롤백
 
 1. Batch 병렬 작업이 이 문서의 Redis 계약을 사용하는지 확인한다.
-2. staging Redis Cluster에서 Lua key slot과 DLT backlog smoke test를 수행한다.
+2. staging Redis Cluster에서 Lua key slot과 배포 이후 DLT 이벤트 smoke test를 수행한다.
 3. DLT lag, stale·duplicate·conflict 지표와 lock 경합 로그를 확인한다.
 4. 이상 시 DLT consumer를 환경변수로 먼저 비활성화한다.
 5. 전체 변경 롤백이 필요하면 이전 worker image를 배포한다. 추가된 Redis hash field와 state key는 이전 worker 동작을 방해하지 않는다.

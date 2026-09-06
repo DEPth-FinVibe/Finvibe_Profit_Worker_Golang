@@ -29,7 +29,7 @@
 ### S2. Kafka DLT 빠른 복구 — 완료
 
 - DLT topic을 별도 consumer group으로 소비한다.
-- 최초 backlog 처리를 위해 offset reset을 `earliest`로 설정한다.
+- 최초 offset이 없으면 `latest`에서 시작해 배포 이후 DLT 이벤트를 처리한다.
 - 기본 가격 handler와 수익률 계산 진입점을 공유한다.
 - DLT 전용 event type으로 처리 지표를 분리한다.
 - 활성화 여부와 concurrency를 환경변수로 제어한다.
@@ -89,6 +89,7 @@
 | D2 재시도 안전한 갱신 | 완료 | 포트폴리오 hash와 Lua로 원자적 교체 |
 | D3 주기적 전수 검증 주체 | 완료 | 병렬 Batch reconciliation이 담당 |
 | D4 최신성 판정 규칙 | 완료 | `updatedAt` 우선, 동일 시각 충돌은 기존 값 유지 |
+| D5 최초 DLT 활성화 정책 | 완료 | 기본 활성화, 최초 offset은 `latest` |
 
 세부 근거와 트레이드오프는 `03-decisions.md`에서 관리한다.
 
@@ -99,5 +100,6 @@ D1 DLT 소비 (완료)
   → D2 원자적 갱신 (완료)
     → D3 Batch 책임 분리 (완료)
       → D4 최신성 규칙
-        → 전체 검증과 Result
+        → D5 최초 DLT 활성화 정책
+          → 전체 검증과 Result
 ```

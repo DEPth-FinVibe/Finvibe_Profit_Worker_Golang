@@ -73,7 +73,7 @@ Producer는 처리에 실패한 가격 이벤트를 `market.stock-price-updated.
 
 ## 위험과 제약
 
-- DLT backlog에는 현재 평가 상태보다 오래된 이벤트가 포함될 수 있다.
+- DLT consumer group 최초 생성 전의 기존 DLT 이벤트는 재생하지 않는다.
 - Redis Lua의 숫자 계산은 기존 `HINCRBYFLOAT`과 동일하게 부동소수점 정밀도 제약이 있다.
 - 호환용 종목 평가액 key는 Redis Cluster의 slot이 달라 Lua 원자성 경계 밖에서 갱신된다.
 - 가격 이벤트와 거래 이벤트가 같은 보유 종목을 동시에 변경하는 순서는 별도 최신성 제어가 필요하다.
@@ -84,4 +84,4 @@ Producer는 처리에 실패한 가격 이벤트를 `market.stock-price-updated.
 - 선행 PR `#1 feat: 사용자 수익률 Redis write-behind 갱신`은 2026-09-05에 `main`으로 병합됐다.
 - 구현은 병합 커밋 `73fac13`을 기준으로 시작했다.
 - Batch 병렬 작업은 `pf:<portfolioId>`의 `scv:<stockId>`, `cvp`와 가격 적용 시각 계약을 사용한다.
-- DLT backlog 소비는 최신성 판정이 적용된 뒤 배포한다.
+- DLT consumer는 최초 offset이 없을 때 `latest`에서 시작하고 배포 이후 격리 이벤트부터 처리한다.
