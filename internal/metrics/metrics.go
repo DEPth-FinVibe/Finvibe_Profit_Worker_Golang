@@ -23,6 +23,11 @@ const (
 	ReasonStalePriceEvent        = "stale_price_event"
 	ReasonDuplicatePriceEvent    = "duplicate_price_event"
 	ReasonPriceTimestampConflict = "price_timestamp_conflict"
+	ReasonInvalidPayload         = "invalid_payload"
+	ReasonDuplicateEvent         = "duplicate_event"
+
+	ActionDeadLettered = "dead_lettered"
+	ActionDropped      = "dropped"
 
 	OpStockRecalc        = "stock_price_recalculation"
 	OpPortfolioCache     = "portfolio_cache_update"
@@ -47,6 +52,7 @@ type Metrics struct {
 	lastEventAge       *prometheus.GaugeVec
 	consumed           *prometheus.CounterVec
 	skipped            *prometheus.CounterVec
+	recovered          *prometheus.CounterVec
 	affectedPortfolios *prometheus.SummaryVec
 	affectedUsers      *prometheus.SummaryVec
 
@@ -77,6 +83,7 @@ func New(reg *prometheus.Registry) *Metrics {
 		lastEventAge:       prometheus.NewGaugeVec(prometheus.GaugeOpts{Name: "profit_worker_event_last_age", Help: "Last event age"}, []string{"event_type"}),
 		consumed:           prometheus.NewCounterVec(prometheus.CounterOpts{Name: "profit_worker_events_consumed_total", Help: "Consumed events"}, []string{"event_type", "result"}),
 		skipped:            prometheus.NewCounterVec(prometheus.CounterOpts{Name: "profit_worker_events_skipped_total", Help: "Skipped events"}, []string{"event_type", "reason"}),
+		recovered:          prometheus.NewCounterVec(prometheus.CounterOpts{Name: "profit_worker_events_recovered_total", Help: "Events given up on and sent to DLT or dropped"}, []string{"event_type", "action"}),
 		affectedPortfolios: prometheus.NewSummaryVec(prometheus.SummaryOpts{Name: "profit_worker_affected_portfolios", Help: "Affected portfolios"}, []string{"operation"}),
 		affectedUsers:      prometheus.NewSummaryVec(prometheus.SummaryOpts{Name: "profit_worker_affected_users", Help: "Affected users"}, []string{"operation"}),
 	}
@@ -94,6 +101,7 @@ func New(reg *prometheus.Registry) *Metrics {
 		m.lastEventAge,
 		m.consumed,
 		m.skipped,
+		m.recovered,
 		m.affectedPortfolios,
 		m.affectedUsers,
 	)
@@ -198,6 +206,11 @@ func (m *Metrics) RecordConsumed(event, result string) {
 func (m *Metrics) RecordSkipped(event, reason string) {
 	m.skipped.WithLabelValues(event, reason).Inc()
 	m.skippedTotal.Add(1)
+}
+
+// RecordRecovered는 재시도를 포기한 이벤트를 DLT로 보냈거나 버렸을 때 기록한다.
+func (m *Metrics) RecordRecovered(event, action string) {
+	m.recovered.WithLabelValues(event, action).Inc()
 }
 
 func (m *Metrics) RecordAffectedPortfolios(op string, n int) {

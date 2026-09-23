@@ -62,7 +62,7 @@ func TestStockPriceDLTUsesProfitCalculationPath(t *testing.T) {
 	m := metrics.New(prometheus.NewRegistry())
 	store := redisstore.New(rdb, m)
 	profit := service.NewProfitService(store, m, 30*time.Second)
-	consumers := New(config.Config{}, profit, nil, m)
+	consumers := New(config.Config{}, profit, nil, m, nil)
 
 	if err := rdb.SAdd(ctx, "stock:10:portfolios", "100").Err(); err != nil {
 		t.Fatal(err)
@@ -106,7 +106,7 @@ func TestStockBatchSelectsNewestTimestampInsteadOfLastMessage(t *testing.T) {
 	m := metrics.New(prometheus.NewRegistry())
 	store := redisstore.New(rdb, m)
 	profit := service.NewProfitService(store, m, 30*time.Second)
-	consumers := New(config.Config{}, profit, nil, m)
+	consumers := New(config.Config{}, profit, nil, m, nil)
 
 	if err := rdb.SAdd(ctx, "stock:10:portfolios", "100").Err(); err != nil {
 		t.Fatal(err)

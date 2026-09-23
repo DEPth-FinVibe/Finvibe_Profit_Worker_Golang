@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -33,7 +34,19 @@ func main() {
 	store := redisstore.New(rdb, m)
 	profit := service.NewProfitService(store, m, cfg.PriceApplicationLockTTL)
 	cache := service.NewCacheService(store, m)
-	consumers := kconsumer.New(cfg, profit, cache, m)
+	dlt, err := kconsumer.NewDLTProducer(strings.Join(cfg.KafkaBrokers, ","))
+	if err != nil {
+		slog.Error("dlt producer create", "err", err)
+		os.Exit(1)
+	}
+	defer dlt.Close()
+	topicCtx, cancelTopics := context.WithTimeout(ctx, 15*time.Second)
+	if err := dlt.EnsureTopics(topicCtx, []string{cfg.TradeTopic, cfg.PortfolioUserTopic}); err != nil {
+		// 토픽이 없으면 DLT 발행이 실패하고 그 레코드는 재시도 루프에 남는다.
+		slog.Warn("dlt topic create", "err", err)
+	}
+	cancelTopics()
+	consumers := kconsumer.New(cfg, profit, cache, m, dlt)
 	mux := http.NewServeMux()
 	mux.Handle("/actuator/prometheus", promhttp.HandlerFor(reg, promhttp.HandlerOpts{}))
 	mux.HandleFunc("/actuator/health", livenessHandler(ctx))
