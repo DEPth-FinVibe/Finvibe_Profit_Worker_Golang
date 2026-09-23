@@ -355,86 +355,6 @@ func (s *Store) BulkRecalculateUserCurrentValuesAndFetchMetadata(ctx context.Con
 	return out, nil
 }
 
-func (s *Store) IncreaseStockQuantity(ctx context.Context, stockID, portfolioID int64, qty decimal.Decimal) (bool, error) {
-	old := s.getDec(ctx, quantityKey(portfolioID, stockID))
-	added := old.IsZero()
-	neu := old.Add(qty)
-	pipe := s.rdb.Pipeline()
-	pipe.Set(ctx, quantityKey(portfolioID, stockID), neu.String(), 0)
-	pipe.SAdd(ctx, stockPortfoliosKey(stockID), strconv.FormatInt(portfolioID, 10))
-	pipe.SAdd(ctx, portfolioStocksKey(portfolioID), strconv.FormatInt(stockID, 10))
-	_, err := pipe.Exec(ctx)
-	return added, err
-}
-func (s *Store) DecreaseStockQuantity(ctx context.Context, stockID, portfolioID int64, qty decimal.Decimal) (bool, error) {
-	old := s.getDec(ctx, quantityKey(portfolioID, stockID))
-	neu := old.Sub(qty)
-	if neu.Sign() <= 0 {
-		pipe := s.rdb.Pipeline()
-		pipe.Del(ctx, quantityKey(portfolioID, stockID), currentValueKey(portfolioID, stockID))
-		pipe.HDel(ctx, pfKey(portfolioID), stockCurrentValueField(stockID))
-		pipe.SRem(ctx, stockPortfoliosKey(stockID), strconv.FormatInt(portfolioID, 10))
-		pipe.SRem(ctx, portfolioStocksKey(portfolioID), strconv.FormatInt(stockID, 10))
-		_, err := pipe.Exec(ctx)
-		return true, err
-	}
-	return false, s.rdb.Set(ctx, quantityKey(portfolioID, stockID), neu.String(), 0).Err()
-}
-func (s *Store) AddPortfolioPurchasedValue(ctx context.Context, id, amount int64) error {
-	return s.rdb.HIncrBy(ctx, pfKey(id), fPV, amount).Err()
-}
-func (s *Store) SubtractPortfolioPurchasedValue(ctx context.Context, id, amount int64) error {
-	return s.rdb.HIncrBy(ctx, pfKey(id), fPV, -amount).Err()
-}
-func (s *Store) AddPortfolioCurrentValue(ctx context.Context, id int64, amount decimal.Decimal) error {
-	return s.rdb.HIncrByFloat(ctx, pfKey(id), fCVP, toFloat(amount)).Err()
-}
-func (s *Store) SubtractPortfolioCurrentValue(ctx context.Context, id int64, amount decimal.Decimal) error {
-	return s.rdb.HIncrByFloat(ctx, pfKey(id), fCVP, -toFloat(amount)).Err()
-}
-
-const adjustStockCurrentValueScript = `
-local current = redis.call('HGET', KEYS[1], ARGV[1])
-if not current then
-    current = ARGV[3]
-    redis.call('HSET', KEYS[1], ARGV[1], current)
-end
-
-local updated = redis.call('HINCRBYFLOAT', KEYS[1], ARGV[1], ARGV[2])
-if ARGV[4] == '1' and tonumber(updated) <= 0 then
-    redis.call('HDEL', KEYS[1], ARGV[1])
-    return '0'
-end
-return updated
-`
-
-func (s *Store) AddStockCurrentValue(ctx context.Context, stockID, portfolioID int64, amount decimal.Decimal) error {
-	legacyCurrent := s.getDec(ctx, currentValueKey(portfolioID, stockID))
-	updated, err := s.rdb.Eval(ctx, adjustStockCurrentValueScript, []string{pfKey(portfolioID)},
-		stockCurrentValueField(stockID), amount.String(), legacyCurrent.String(), "0").Text()
-	if err != nil {
-		return err
-	}
-	return s.rdb.Set(ctx, currentValueKey(portfolioID, stockID), updated, 0).Err()
-}
-func (s *Store) SubtractStockCurrentValue(ctx context.Context, stockID, portfolioID int64, amount decimal.Decimal) error {
-	legacyCurrent := s.getDec(ctx, currentValueKey(portfolioID, stockID))
-	updated, err := s.rdb.Eval(ctx, adjustStockCurrentValueScript, []string{pfKey(portfolioID)},
-		stockCurrentValueField(stockID), amount.Neg().String(), legacyCurrent.String(), "1").Text()
-	if err != nil {
-		return err
-	}
-	if updated == "0" {
-		return s.rdb.Del(ctx, currentValueKey(portfolioID, stockID)).Err()
-	}
-	return s.rdb.Set(ctx, currentValueKey(portfolioID, stockID), updated, 0).Err()
-}
-func (s *Store) IncreaseAssetCount(ctx context.Context, id int64) error {
-	return s.rdb.HIncrBy(ctx, pfKey(id), fAC, 1).Err()
-}
-func (s *Store) DecreaseAssetCount(ctx context.Context, id int64) error {
-	return s.rdb.HIncrBy(ctx, pfKey(id), fAC, -1).Err()
-}
 func (s *Store) DeletePortfolioState(ctx context.Context, id int64) error {
 	stocks, _ := s.rdb.SMembers(ctx, portfolioStocksKey(id)).Result()
 	pipe := s.rdb.Pipeline()
@@ -483,8 +403,7 @@ func (s *Store) IsPortfolioCountPending(ctx context.Context, portfolioID int64) 
 func (s *Store) ClearPortfolioCountPending(ctx context.Context, portfolioID int64) error {
 	return s.rdb.HDel(ctx, pfKey(portfolioID), fUCP).Err()
 }
-func (s *Store) RemovePortfolioUserMapping(ctx context.Context, portfolioID int64) error {
-	userID := s.FindUserIDByPortfolioID(ctx, portfolioID)
+func (s *Store) RemovePortfolioUserMapping(ctx context.Context, portfolioID int64, userID string) error {
 	pipe := s.rdb.Pipeline()
 	pipe.HDel(ctx, pfKey(portfolioID), fU, fUCP)
 	if userID != "" {
@@ -492,24 +411,6 @@ func (s *Store) RemovePortfolioUserMapping(ctx context.Context, portfolioID int6
 	}
 	_, err := pipe.Exec(ctx)
 	return err
-}
-func (s *Store) AddUserPurchasedValue(ctx context.Context, id string, amount int64) error {
-	return s.rdb.HIncrBy(ctx, usrKey(id), fPV, amount).Err()
-}
-func (s *Store) SubtractUserPurchasedValue(ctx context.Context, id string, amount int64) error {
-	return s.rdb.HIncrBy(ctx, usrKey(id), fPV, -amount).Err()
-}
-func (s *Store) AddUserCurrentValue(ctx context.Context, id string, amount decimal.Decimal) error {
-	return s.rdb.HIncrByFloat(ctx, usrKey(id), fCVP, toFloat(amount)).Err()
-}
-func (s *Store) SubtractUserCurrentValue(ctx context.Context, id string, amount decimal.Decimal) error {
-	return s.rdb.HIncrByFloat(ctx, usrKey(id), fCVP, -toFloat(amount)).Err()
-}
-func (s *Store) IncreasePortfolioCount(ctx context.Context, id string) error {
-	return s.rdb.HIncrBy(ctx, usrKey(id), fPC, 1).Err()
-}
-func (s *Store) DecreasePortfolioCount(ctx context.Context, id string) error {
-	return s.rdb.HIncrBy(ctx, usrKey(id), fPC, -1).Err()
 }
 func (s *Store) FindUserPurchasedValue(ctx context.Context, id string) int64 {
 	return s.hint(ctx, usrKey(id), fPV)
