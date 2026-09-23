@@ -2,10 +2,10 @@
 
 ## 문서 정보
 
-- 완료일: 2026-09-22
+- 완료일: 2026-09-23
 - 대상 저장소: `Finvibe_Profit_Worker_Golang`
 - 작업 브랜치: `feat/kafka-retry-dlt`
-- 상태: 구현 및 로컬 검증 완료, 미배포
+- 상태: 구현 완료, 실제 Kafka·Redis Cluster 로컬 검증 완료, 미배포
 - 리뷰 상태: 리뷰 필요
 
 ## 결과 요약
