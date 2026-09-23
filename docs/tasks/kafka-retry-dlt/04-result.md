@@ -83,11 +83,29 @@
 
 마커를 무력화(항상 새 마커)하면 멱등성 테스트 3개가 실패하는 것을 확인했다. 삭제 재처리 테스트는 "매핑이 없으면 합계를 빼지 않는" 순서가 따로 막아 통과한다.
 
+### 실제 의존성 검증
+
+로컬 Docker에 실제 Kafka(3.9.0, KRaft 단일 노드)와 3노드 Redis Cluster(7.2)를 띄워 확인했다. 환경변수가 없으면 자동으로 skip된다.
+
+```bash
+KAFKA_TEST_BROKERS=verify-kafka:9092 \
+REDIS_TEST_CLUSTER_NODES=<node1>:6379,<node2>:6379,<node3>:6379 \
+  go test ./...
+```
+
+| 테스트 | 검증 | 결과 |
+|---|---|---|
+| `TestEnsureTopicsCreatesDeadLetterTopics` | DLT 토픽 생성, 재호출 시 에러 없음 | 통과 |
+| `TestFailingRecordIsDeadLetteredOnRealBroker` | 실제 브로커에서 실패 레코드 재시도(pause·poll) → 그 레코드만 DLT, 원본 위치 header, 배치 전체 offset 커밋(3) | 통과 |
+| `TestIdempotentWritesRunOnRealCluster` | Cluster에서 멱등 쓰기 Lua 3회 반복 → 수량·구매액·평가액·종목 평가액 모두 한 번만 | 통과 |
+| `TestSellRemovesStockValueOnRealCluster` | 전량 매도 시 수량 키·`scv` 필드·역인덱스 정리 | 통과 |
+
+마커 키를 같은 slot에 두지 않도록(`applied:<이벤트 키>:<데이터 키>`) 바꾸면 두 Cluster 테스트가 **`CROSSSLOT Keys in request don't hash to the same slot`**으로 실패한다. hash tag로 마커를 데이터 키에 붙이는 것이 이 설계의 전제라는 것을 실측으로 확인했다.
+
 ## 검증하지 못한 것
 
-- 실제 Kafka 브로커에서의 pause·poll·DLT 발행 (가짜 consumer와 가짜 publisher로 검증)
-- 실제 Redis에서의 Go Lua 스크립트 실행 (miniredis의 Lua로 검증. 같은 방식의 Java 스크립트는 실제 Redis 7.2에서 검증함)
-- DLT 토픽 자동 생성 (`EnsureTopics`)
+- 운영과 같은 규모·토폴로지(여러 파티션·여러 pod·리밸런스 중 재시도)에서의 동작
+- 스테이징·운영 배포 후의 지표 관찰
 
 ## 남은 위험
 
