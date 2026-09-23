@@ -33,6 +33,7 @@ func TestTradeUpdatesPortfolioAndUserSnapshotsOnce(t *testing.T) {
 
 	assertHash(t, mr, "pf:100", "pv", "360")
 	assertHash(t, mr, "pf:100", "cv", "360")
+	assertHash(t, mr, "pf:100", "scv:10", "360")
 	assertHash(t, mr, "usr:7", "pv", "360")
 	assertHash(t, mr, "usr:7", "cv", "360")
 	assertUpdatedAt(t, mr, "pf:100")

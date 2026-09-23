@@ -2,6 +2,8 @@ package service
 
 import (
 	"context"
+	"fmt"
+	"log/slog"
 	"time"
 
 	"finvibe-profit-worker-go/internal/metrics"
@@ -11,20 +13,154 @@ import (
 )
 
 type ProfitService struct {
-	store   *redisstore.Store
-	metrics *metrics.Metrics
+	store        *redisstore.Store
+	metrics      *metrics.Metrics
+	priceLockTTL time.Duration
 }
 
-func NewProfitService(s *redisstore.Store, m *metrics.Metrics) *ProfitService {
-	return &ProfitService{s, m}
+func NewProfitService(s *redisstore.Store, m *metrics.Metrics, priceLockTTL time.Duration) *ProfitService {
+	if priceLockTTL <= 0 {
+		priceLockTTL = 30 * time.Second
+	}
+	return &ProfitService{store: s, metrics: m, priceLockTTL: priceLockTTL}
 }
 
 type recalcTask struct{ portfolioID, stockID, newPrice int64 }
 
-func (s *ProfitService) UpdateProfitsByStockPriceChanges(ctx context.Context, reqs []model.ProfitCalculationRequest) error {
+type PriceUpdateResult struct {
+	Applied int
+	Skipped map[string]int
+}
+
+func (s *ProfitService) UpdateProfitsByStockPriceChanges(ctx context.Context, reqs []model.ProfitCalculationRequest) (PriceUpdateResult, error) {
 	start := time.Now()
 	result := metrics.ResultFailure
 	defer func() { s.metrics.ObserveService(metrics.OpStockRecalc, result, start) }()
+	outcome := PriceUpdateResult{Skipped: make(map[string]int)}
+	if len(reqs) == 0 {
+		result = metrics.ResultSuccess
+		return outcome, nil
+	}
+
+	stockIDs := make([]int64, 0, len(reqs))
+	for _, request := range reqs {
+		if request.Timestamp.IsZero() {
+			return outcome, fmt.Errorf("stock %d price timestamp is empty", request.StockID)
+		}
+		stockIDs = append(stockIDs, request.StockID)
+	}
+	locks, err := s.store.AcquireStockPriceLocks(ctx, stockIDs, s.priceLockTTL)
+	if err != nil {
+		return outcome, err
+	}
+	defer func() {
+		releaseCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		_ = locks.Release(releaseCtx)
+	}()
+
+	applyCtx, cancelApply := context.WithCancel(ctx)
+	defer cancelApply()
+	stopRenewal, renewalDone := s.renewPriceLocks(applyCtx, cancelApply, locks)
+	renewalStopped := false
+	stopAndCheckRenewal := func() error {
+		if !renewalStopped {
+			close(stopRenewal)
+			renewalStopped = true
+		}
+		return <-renewalDone
+	}
+	defer func() {
+		if !renewalStopped {
+			close(stopRenewal)
+			<-renewalDone
+		}
+	}()
+
+	appliedStates, err := s.store.BulkFetchAppliedStockPrices(applyCtx, stockIDs)
+	if err != nil {
+		return outcome, err
+	}
+	accepted := make([]model.ProfitCalculationRequest, 0, len(reqs))
+	for _, request := range reqs {
+		applied, exists := appliedStates[request.StockID]
+		if !exists || request.Timestamp.After(applied.Timestamp) {
+			accepted = append(accepted, request)
+			continue
+		}
+		if request.Timestamp.Before(applied.Timestamp) {
+			outcome.Skipped[metrics.ReasonStalePriceEvent]++
+			continue
+		}
+		if request.NewPrice == applied.Price {
+			outcome.Skipped[metrics.ReasonDuplicatePriceEvent]++
+			continue
+		}
+		outcome.Skipped[metrics.ReasonPriceTimestampConflict]++
+		slog.Warn("stock price timestamp conflict",
+			"stock_id", request.StockID,
+			"updated_at", request.Timestamp,
+			"applied_price", applied.Price,
+			"incoming_price", request.NewPrice,
+		)
+	}
+
+	if len(accepted) > 0 {
+		if err := s.applyStockPriceChanges(applyCtx, accepted); err != nil {
+			return outcome, err
+		}
+	}
+	if err := stopAndCheckRenewal(); err != nil {
+		return outcome, err
+	}
+	if err := locks.Refresh(ctx); err != nil {
+		return outcome, err
+	}
+	states := make([]redisstore.AppliedStockPrice, 0, len(accepted))
+	for _, request := range accepted {
+		states = append(states, redisstore.AppliedStockPrice{
+			StockID: request.StockID, Price: request.NewPrice, Timestamp: request.Timestamp,
+		})
+	}
+	if err := locks.Commit(ctx, states); err != nil {
+		return outcome, err
+	}
+	outcome.Applied = len(accepted)
+	result = metrics.ResultSuccess
+	return outcome, nil
+}
+
+func (s *ProfitService) renewPriceLocks(ctx context.Context, cancelApply context.CancelFunc, locks *redisstore.StockPriceLockSet) (chan struct{}, chan error) {
+	stop := make(chan struct{})
+	done := make(chan error, 1)
+	interval := s.priceLockTTL / 3
+	if interval < time.Second {
+		interval = time.Second
+	}
+	go func() {
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				done <- ctx.Err()
+				return
+			case <-stop:
+				done <- nil
+				return
+			case <-ticker.C:
+				if err := locks.Refresh(ctx); err != nil {
+					cancelApply()
+					done <- err
+					return
+				}
+			}
+		}
+	}()
+	return stop, done
+}
+
+func (s *ProfitService) applyStockPriceChanges(ctx context.Context, reqs []model.ProfitCalculationRequest) error {
 	phase := time.Now()
 	priceByStock := make(map[int64]int64, len(reqs))
 	stockIDs := make([]int64, 0, len(reqs))
@@ -44,7 +180,6 @@ func (s *ProfitService) UpdateProfitsByStockPriceChanges(ctx context.Context, re
 		}
 	}
 	if len(tasks) == 0 {
-		result = metrics.ResultSuccess
 		return nil
 	}
 	phase = time.Now()
@@ -58,7 +193,7 @@ func (s *ProfitService) UpdateProfitsByStockPriceChanges(ctx context.Context, re
 	}
 	s.metrics.ObservePhase(metrics.OpStockRecalc, "bulk_prefetch", metrics.ResultSuccess, phase)
 	phase = time.Now()
-	portfolioDelta := make(map[int64]decimal.Decimal)
+	replacements := make(map[int64][]redisstore.StockCurrentValueReplacement)
 	stockCV := make(map[string]decimal.Decimal)
 	for _, t := range tasks {
 		h := holdings[model.StockHoldingKey{PortfolioID: t.portfolioID, StockID: t.stockID}.String()]
@@ -66,21 +201,23 @@ func (s *ProfitService) UpdateProfitsByStockPriceChanges(ctx context.Context, re
 			continue
 		}
 		newCV := decimal.NewFromInt(t.newPrice).Mul(h.Quantity)
-		delta := newCV.Sub(h.CurrentValue)
-		if old, ok := portfolioDelta[t.portfolioID]; ok {
-			portfolioDelta[t.portfolioID] = old.Add(delta)
-		} else {
-			portfolioDelta[t.portfolioID] = delta
-		}
+		replacements[t.portfolioID] = append(replacements[t.portfolioID], redisstore.StockCurrentValueReplacement{
+			StockID:       t.stockID,
+			PreviousValue: h.CurrentValue,
+			CurrentValue:  newCV,
+		})
 		stockCV[s.store.StockCurrentValueKey(t.portfolioID, t.stockID)] = newCV
 	}
 	s.metrics.ObservePhase(metrics.OpStockRecalc, "in_memory_compute", metrics.ResultSuccess, phase)
+	if len(replacements) == 0 {
+		return nil
+	}
 	phase = time.Now()
-	states, err := s.store.BulkIncrementPortfolioCurrentValuesAndFetchMetadata(ctx, portfolioDelta)
+	states, err := s.store.BulkReplaceStockCurrentValuesAndFetchMetadata(ctx, replacements)
 	if err != nil {
 		return err
 	}
-	s.metrics.ObservePhase(metrics.OpStockRecalc, "pipeline_portfolio_incr", metrics.ResultSuccess, phase)
+	s.metrics.ObservePhase(metrics.OpStockRecalc, "atomic_stock_cv_replace", metrics.ResultSuccess, phase)
 	phase = time.Now()
 	if len(stockCV) > 0 {
 		if err := s.store.BulkSetStockCurrentValues(ctx, stockCV); err != nil {
@@ -89,8 +226,8 @@ func (s *ProfitService) UpdateProfitsByStockPriceChanges(ctx context.Context, re
 	}
 	s.metrics.ObservePhase(metrics.OpStockRecalc, "pipeline_stock_cv_set", metrics.ResultSuccess, phase)
 	phase = time.Now()
-	vals := make([]model.PortfolioValuation, 0, len(portfolioDelta))
-	for pf := range portfolioDelta {
+	vals := make([]model.PortfolioValuation, 0, len(replacements))
+	for pf := range replacements {
 		st := states[pf]
 		vals = append(vals, model.PortfolioValuation{
 			PortfolioID:    pf,
@@ -108,7 +245,7 @@ func (s *ProfitService) UpdateProfitsByStockPriceChanges(ctx context.Context, re
 
 	phase = time.Now()
 	affectedUsers := make(map[string]struct{})
-	for portfolioID := range portfolioDelta {
+	for portfolioID := range replacements {
 		userID := states[portfolioID].Metadata.UserID
 		if userID == "" {
 			continue
@@ -140,6 +277,5 @@ func (s *ProfitService) UpdateProfitsByStockPriceChanges(ctx context.Context, re
 	}
 	s.metrics.ObservePhase(metrics.OpStockRecalc, "user_fanout", metrics.ResultSuccess, phase)
 	s.metrics.RecordAffectedUsers(metrics.OpStockRecalc, len(affectedUsers))
-	result = metrics.ResultSuccess
 	return nil
 }
