@@ -109,11 +109,36 @@ REDIS_TEST_CLUSTER_NODES=<node1>:6379,<node2>:6379,<node3>:6379 \
 
 처음 작성한 버전은 리밸런스만 일으키고 재전달을 재현하지 않아, 마커를 모두 무력화해도 통과했다. 처리 루프가 배치 끝에서 커밋하고 ctx 취소도 배치를 마친 뒤 멈추기 때문에 커밋되지 않은 구간이 생기지 않았다. 재전달 단계를 넣은 뒤에는 마커를 무력화하면 수량이 40에서 **80**으로 두 배가 되어 실패한다.
 
+### 여러 pod 검증 (`verify-multi-pod.sh`)
+
+워커 이미지를 독립 컨테이너 두 개로 띄우고(운영과 같은 배선·환경변수), 처리 중 하나를 `SIGKILL`로 죽였다. 1파동으로 모든 파티션에 커밋된 offset을 만든 뒤, 2파동(포트폴리오당 50건)을 처리하는 동안 Redis를 잠깐 멈추고 죽였다.
+
+결과는 포트폴리오마다 수량 102, 금액 10,200원으로 **유실도 중복도 없었다**. DLT도 비어 있었다.
+
+브로커는 Kafka 4.0을 쓴다. 운영과 같은 `KAFKA_GROUP_PROTOCOL=consumer`(KIP-848)가 기본 지원되기 때문이다. Kafka 3.9로 돌리면 컨슈머가 그룹에 붙지 못하고 **에러 로그도 없이 아무것도 처리하지 않는다**. 검증 환경을 만들 때 주의해야 한다.
+
+검증 중 확인한 두 가지:
+
+- 워커의 `auto.offset.reset`은 `latest`다. 어떤 파티션에 커밋된 offset이 한 번도 없는 상태에서 소유자가 죽으면, 새 소유자는 log end부터 읽어 **그 사이 메시지를 건너뛴다**. 새 consumer group의 첫 배포 구간에만 해당한다.
+- 이 스크립트로는 **재전달 자체를 만들지 못했다**. 마커를 모두 무력화해도 결과가 같았다. 처리 루프가 배치마다 곧바로 커밋해서, `SIGKILL` 시점에 적용됐지만 커밋되지 않은 구간이 남지 않았다. 중복 방지 경로는 재전달을 강제하는 in-process 테스트(`TestTradesSurviveRebalanceAcrossPartitions`)가 증명한다.
+
+### 재시도 중 파티션 회수 검증 (`TestLongRetrySurvivesAnotherConsumerJoining`)
+
+2파티션 토픽에서 레코드 하나를 계속 실패시켜 재시도에 들어간 뒤, 같은 그룹에 두 번째 컨슈머를 붙였다. 실제 브로커 로그에서 회수 경로가 그대로 실행됐다.
+
+```
+WARN record failed, retrying wait=500ms
+WARN record failed, retrying wait=1s
+WARN kafka rewind unprocessed records err="Local: Erroneous state"   ← 파티션 회수로 재시도 중단
+WARN record failed, retrying wait=500ms                              ← 두 번째 컨슈머가 이어받음
+```
+
+장애를 해소하자 레코드는 **정확히 1회** 반영됐고, DLT는 비었고 offset은 1로 커밋됐다. 회수된 파티션을 되감으려다 실패하는 `Local: Erroneous state` 경고는 정상 흐름이지만 회수마다 남는다.
+
 ## 검증하지 못한 것
 
-- 여러 pod로 나눠 배포한 상태에서의 동작 (한 프로세스 안에서 컨슈머 2개로 검증)
-- 재시도 대기 중 파티션 회수 (가짜 consumer 단위 테스트로만 검증)
 - 스테이징·운영 배포 후의 지표 관찰
+- 여러 pod 환경에서 재전달이 실제로 발생하는 상황 (위 참고)
 
 ## 남은 위험
 
