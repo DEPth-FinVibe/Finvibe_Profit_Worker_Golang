@@ -95,8 +95,8 @@ func New(reg *prometheus.Registry) *Metrics {
 			Help:    "Delay from KIS execution time (priceVersion) to profit application commit",
 			Buckets: []float64{0.1, 0.25, 0.5, 1, 2, 5, 10, 30, 60, 300},
 		}),
-		priceBehindStocks: prometheus.NewGauge(prometheus.GaugeOpts{Name: "profit_worker_price_version_behind_stocks", Help: "Held stocks whose applied price lags the monolith's latest published price"}),
-		priceMaxGap:       prometheus.NewGauge(prometheus.GaugeOpts{Name: "profit_worker_price_version_max_gap_seconds", Help: "Largest priceVersion gap in seconds among lagging held stocks"}),
+		priceBehindStocks: prometheus.NewGauge(prometheus.GaugeOpts{Name: "profit_worker_price_version_behind_stocks", Help: "Held stocks whose latest published price has stayed unapplied beyond the grace period"}),
+		priceMaxGap:       prometheus.NewGauge(prometheus.GaugeOpts{Name: "profit_worker_price_unapplied_max_age_seconds", Help: "Longest time a published price has stayed unapplied among lagging held stocks"}),
 		priceGapChecks:    prometheus.NewCounterVec(prometheus.CounterOpts{Name: "profit_worker_price_version_gap_checks_total", Help: "Periodic priceVersion gap checks"}, []string{"result"}),
 	}
 	wrapped.MustRegister(
@@ -214,9 +214,9 @@ func (m *Metrics) RecordPriceApplyLag(lag time.Duration) {
 	}
 }
 
-func (m *Metrics) SetPriceVersionGap(behindStocks int, maxGapSeconds float64) {
+func (m *Metrics) SetPriceVersionGap(behindStocks int, maxUnappliedAgeSeconds float64) {
 	m.priceBehindStocks.Set(float64(behindStocks))
-	m.priceMaxGap.Set(maxGapSeconds)
+	m.priceMaxGap.Set(maxUnappliedAgeSeconds)
 }
 
 func (m *Metrics) RecordPriceVersionGapCheck(result string) {
