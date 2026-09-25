@@ -279,7 +279,8 @@ func (c *Consumers) handleStockMessages(ctx context.Context, msgs []message, eve
 			c.metrics.RecordRecovered(eventType, metrics.ActionDropped)
 			continue
 		}
-		c.metrics.RecordAge(eventType, time.Since(ev.UpdatedAt.Time))
+		// updatedAt은 KST wall clock을 UTC로 읽은 값이라 그대로 쓰면 나이가 음수가 된다. 버전의 체결시각을 쓴다.
+		c.metrics.RecordAge(eventType, time.Since(model.VersionTime(ev.Version())))
 		reqs = append(reqs, model.ProfitCalculationRequest{StockID: ev.StockID, NewPrice: price, Timestamp: ev.UpdatedAt.Time, Version: ev.Version()})
 	}
 	outcome, err := c.profit.UpdateProfitsByStockPriceChanges(ctx, reqs)

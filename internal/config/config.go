@@ -32,6 +32,7 @@ type Config struct {
 	MaxPollRecords           int
 	BatchMaxWait             time.Duration
 	PriceApplicationLockTTL  time.Duration
+	PriceGapCheckInterval    time.Duration
 	ShutdownTimeout          time.Duration
 }
 
@@ -61,6 +62,7 @@ func Load() Config {
 		MaxPollRecords:           getint("KAFKA_MAX_POLL_RECORDS", 100),
 		BatchMaxWait:             time.Duration(getint("KAFKA_BATCH_MAX_WAIT_MS", 50)) * time.Millisecond,
 		PriceApplicationLockTTL:  time.Duration(getint("PRICE_APPLICATION_LOCK_TTL_SECONDS", 30)) * time.Second,
+		PriceGapCheckInterval:    time.Duration(getint("PRICE_GAP_CHECK_INTERVAL_SECONDS", 30)) * time.Second,
 		ShutdownTimeout:          time.Duration(getint("SHUTDOWN_TIMEOUT_SECONDS", 20)) * time.Second,
 	}
 }

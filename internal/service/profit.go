@@ -127,6 +127,10 @@ func (s *ProfitService) UpdateProfitsByStockPriceChanges(ctx context.Context, re
 	if err := locks.Commit(ctx, states); err != nil {
 		return outcome, err
 	}
+	committedAt := time.Now()
+	for _, request := range accepted {
+		s.metrics.RecordPriceApplyLag(committedAt.Sub(model.VersionTime(request.Version)))
+	}
 	outcome.Applied = len(accepted)
 	result = metrics.ResultSuccess
 	return outcome, nil

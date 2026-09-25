@@ -55,6 +55,10 @@ type Metrics struct {
 	recovered          *prometheus.CounterVec
 	affectedPortfolios *prometheus.SummaryVec
 	affectedUsers      *prometheus.SummaryVec
+	priceApplyLag      prometheus.Histogram
+	priceBehindStocks  prometheus.Gauge
+	priceMaxGap        prometheus.Gauge
+	priceGapChecks     *prometheus.CounterVec
 
 	// lightweight per-minute counters for console dump
 	consumedTotal atomic.Int64
@@ -86,6 +90,14 @@ func New(reg *prometheus.Registry) *Metrics {
 		recovered:          prometheus.NewCounterVec(prometheus.CounterOpts{Name: "profit_worker_events_recovered_total", Help: "Events given up on and sent to DLT or dropped"}, []string{"event_type", "action"}),
 		affectedPortfolios: prometheus.NewSummaryVec(prometheus.SummaryOpts{Name: "profit_worker_affected_portfolios", Help: "Affected portfolios"}, []string{"operation"}),
 		affectedUsers:      prometheus.NewSummaryVec(prometheus.SummaryOpts{Name: "profit_worker_affected_users", Help: "Affected users"}, []string{"operation"}),
+		priceApplyLag: prometheus.NewHistogram(prometheus.HistogramOpts{
+			Name:    "profit_worker_price_apply_lag_seconds",
+			Help:    "Delay from KIS execution time (priceVersion) to profit application commit",
+			Buckets: []float64{0.1, 0.25, 0.5, 1, 2, 5, 10, 30, 60, 300},
+		}),
+		priceBehindStocks: prometheus.NewGauge(prometheus.GaugeOpts{Name: "profit_worker_price_version_behind_stocks", Help: "Held stocks whose applied price lags the monolith's latest published price"}),
+		priceMaxGap:       prometheus.NewGauge(prometheus.GaugeOpts{Name: "profit_worker_price_version_max_gap_seconds", Help: "Largest priceVersion gap in seconds among lagging held stocks"}),
+		priceGapChecks:    prometheus.NewCounterVec(prometheus.CounterOpts{Name: "profit_worker_price_version_gap_checks_total", Help: "Periodic priceVersion gap checks"}, []string{"result"}),
 	}
 	wrapped.MustRegister(
 		m.listener,
@@ -104,6 +116,10 @@ func New(reg *prometheus.Registry) *Metrics {
 		m.recovered,
 		m.affectedPortfolios,
 		m.affectedUsers,
+		m.priceApplyLag,
+		m.priceBehindStocks,
+		m.priceMaxGap,
+		m.priceGapChecks,
 	)
 	return m
 }
@@ -190,6 +206,21 @@ func (m *Metrics) RecordAge(event string, age time.Duration) {
 		m.eventAge.WithLabelValues(event).Observe(seconds)
 		m.lastEventAge.WithLabelValues(event).Set(seconds)
 	}
+}
+
+func (m *Metrics) RecordPriceApplyLag(lag time.Duration) {
+	if lag >= 0 {
+		m.priceApplyLag.Observe(lag.Seconds())
+	}
+}
+
+func (m *Metrics) SetPriceVersionGap(behindStocks int, maxGapSeconds float64) {
+	m.priceBehindStocks.Set(float64(behindStocks))
+	m.priceMaxGap.Set(maxGapSeconds)
+}
+
+func (m *Metrics) RecordPriceVersionGapCheck(result string) {
+	m.priceGapChecks.WithLabelValues(result).Inc()
 }
 
 func (m *Metrics) RecordConsumed(event, result string) {

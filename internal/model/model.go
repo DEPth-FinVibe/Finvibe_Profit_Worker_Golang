@@ -38,6 +38,11 @@ var marketLocation = time.FixedZone("KST", 9*60*60)
 // VersionFromWallClock은 priceVersion(체결 epoch 초 × 10^6 + 초 안 순번)의 순번 0 값을 유도한다.
 // t의 wall clock을 KST로 다시 읽는다. 그대로 epoch으로 바꾸면 모놀리식이 부여한 버전보다 9시간 앞서
 // 새 버전 이벤트가 모두 오래된 틱으로 버려진다.
+// VersionTime은 priceVersion의 체결시각(초 단위)이다.
+func VersionTime(version int64) time.Time {
+	return time.Unix(version/1_000_000, 0)
+}
+
 func VersionFromWallClock(t time.Time) int64 {
 	wall := time.Date(t.Year(), t.Month(), t.Day(), t.Hour(), t.Minute(), t.Second(), 0, marketLocation)
 	return wall.Unix() * 1_000_000

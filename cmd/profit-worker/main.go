@@ -34,6 +34,7 @@ func main() {
 	store := redisstore.New(rdb, m)
 	profit := service.NewProfitService(store, m, cfg.PriceApplicationLockTTL)
 	cache := service.NewCacheService(store, m)
+	go service.NewPriceGapChecker(store, m, cfg.PriceGapCheckInterval).Run(ctx)
 	dlt, err := kconsumer.NewDLTProducer(strings.Join(cfg.KafkaBrokers, ","))
 	if err != nil {
 		slog.Error("dlt producer create", "err", err)
