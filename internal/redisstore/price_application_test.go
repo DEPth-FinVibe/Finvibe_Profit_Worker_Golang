@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"finvibe-profit-worker-go/internal/model"
 	"github.com/alicebob/miniredis/v2"
 	"github.com/redis/go-redis/v9"
 )
@@ -87,5 +88,37 @@ func TestStockPriceLockRefreshExtendsOwnership(t *testing.T) {
 	mr.FastForward(1500 * time.Millisecond)
 	if err := locks.Commit(ctx, []AppliedStockPrice{{StockID: 10, Price: 120, Timestamp: time.Now()}}); err != nil {
 		t.Fatalf("commit after refresh failed: %v", err)
+	}
+}
+
+func TestAppliedStockPriceVersionStoredAndDerivedForLegacyState(t *testing.T) {
+	ctx := context.Background()
+	mr := miniredis.RunT(t)
+	rdb := redis.NewClient(&redis.Options{Addr: mr.Addr()})
+	store := New(rdb, nil)
+	appliedAt := time.Date(2026, 9, 25, 10, 0, 1, 0, time.UTC)
+
+	locks, err := store.AcquireStockPriceLocks(ctx, []int64{10}, 30*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := locks.Commit(ctx, []AppliedStockPrice{{StockID: 10, Price: 121, Timestamp: appliedAt, Version: 1790298001000001}}); err != nil {
+		t.Fatal(err)
+	}
+	if got := mr.HGet(stockPriceApplicationKey(10), "ver"); got != "1790298001000001" {
+		t.Fatalf("stored version got %q", got)
+	}
+	// 배포 전 워커가 남긴 상태에는 ver가 없다.
+	mr.HSet(stockPriceApplicationKey(20), "at", appliedAt.Format(time.RFC3339Nano), "price", "120")
+
+	states, err := store.BulkFetchAppliedStockPrices(ctx, []int64{10, 20})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := states[10].Version; got != 1790298001000001 {
+		t.Fatalf("stored state version got %d", got)
+	}
+	if got, want := states[20].Version, model.VersionFromWallClock(appliedAt); got != want {
+		t.Fatalf("legacy state version got %d want %d", got, want)
 	}
 }

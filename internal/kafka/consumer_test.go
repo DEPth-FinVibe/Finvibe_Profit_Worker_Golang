@@ -132,3 +132,38 @@ func TestStockBatchSelectsNewestTimestampInsteadOfLastMessage(t *testing.T) {
 		t.Fatalf("portfolio current value got %q", got)
 	}
 }
+
+func TestStockBatchSelectsHighestVersionWithinSameSecond(t *testing.T) {
+	ctx := context.Background()
+	mr := miniredis.RunT(t)
+	rdb := redis.NewClient(&redis.Options{Addr: mr.Addr()})
+	m := metrics.New(prometheus.NewRegistry())
+	store := redisstore.New(rdb, m)
+	profit := service.NewProfitService(store, m, 30*time.Second)
+	consumers := New(config.Config{}, profit, nil, m, nil)
+
+	if err := rdb.SAdd(ctx, "stock:10:portfolios", "100").Err(); err != nil {
+		t.Fatal(err)
+	}
+	if err := rdb.Set(ctx, "portfolio:100:stock:10:quantity", "3", 0).Err(); err != nil {
+		t.Fatal(err)
+	}
+	if err := rdb.Set(ctx, "portfolio:100:stock:10:current-value", "300", 0).Err(); err != nil {
+		t.Fatal(err)
+	}
+	if err := rdb.HSet(ctx, "pf:100", map[string]any{"pv": "240", "cvp": "300", "ac": "1"}).Err(); err != nil {
+		t.Fatal(err)
+	}
+
+	// 같은 초의 두 틱이 역순으로 들어와도 버전이 큰 쪽을 고른다. 기존에는 충돌로 보고 나중 것을 버렸다.
+	err := consumers.handleStock(ctx, []message{
+		{value: []byte(`{"stockId":10,"price":121,"updatedAt":"2026-09-25T10:00:01","priceVersion":1790298001000001}`)},
+		{value: []byte(`{"stockId":10,"price":120,"updatedAt":"2026-09-25T10:00:01","priceVersion":1790298001000000}`)},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := mr.HGet("pf:100", "cvp"); got != "363" {
+		t.Fatalf("portfolio current value got %q", got)
+	}
+}

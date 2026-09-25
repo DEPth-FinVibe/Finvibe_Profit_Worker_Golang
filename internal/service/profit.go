@@ -83,12 +83,13 @@ func (s *ProfitService) UpdateProfitsByStockPriceChanges(ctx context.Context, re
 	}
 	accepted := make([]model.ProfitCalculationRequest, 0, len(reqs))
 	for _, request := range reqs {
+		request.Version = request.EffectiveVersion()
 		applied, exists := appliedStates[request.StockID]
-		if !exists || request.Timestamp.After(applied.Timestamp) {
+		if !exists || request.Version > applied.Version {
 			accepted = append(accepted, request)
 			continue
 		}
-		if request.Timestamp.Before(applied.Timestamp) {
+		if request.Version < applied.Version {
 			outcome.Skipped[metrics.ReasonStalePriceEvent]++
 			continue
 		}
@@ -97,8 +98,9 @@ func (s *ProfitService) UpdateProfitsByStockPriceChanges(ctx context.Context, re
 			continue
 		}
 		outcome.Skipped[metrics.ReasonPriceTimestampConflict]++
-		slog.Warn("stock price timestamp conflict",
+		slog.Warn("stock price version conflict",
 			"stock_id", request.StockID,
+			"version", request.Version,
 			"updated_at", request.Timestamp,
 			"applied_price", applied.Price,
 			"incoming_price", request.NewPrice,
@@ -119,7 +121,7 @@ func (s *ProfitService) UpdateProfitsByStockPriceChanges(ctx context.Context, re
 	states := make([]redisstore.AppliedStockPrice, 0, len(accepted))
 	for _, request := range accepted {
 		states = append(states, redisstore.AppliedStockPrice{
-			StockID: request.StockID, Price: request.NewPrice, Timestamp: request.Timestamp,
+			StockID: request.StockID, Price: request.NewPrice, Timestamp: request.Timestamp, Version: request.Version,
 		})
 	}
 	if err := locks.Commit(ctx, states); err != nil {

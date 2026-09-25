@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"time"
 
+	"finvibe-profit-worker-go/internal/model"
 	"github.com/redis/go-redis/v9"
 )
 
@@ -22,6 +23,8 @@ type AppliedStockPrice struct {
 	StockID   int64
 	Price     int64
 	Timestamp time.Time
+	// ver가 없는 기존 반영 상태는 Timestamp로 유도한다.
+	Version int64
 }
 
 type stockPriceLock struct {
@@ -128,7 +131,14 @@ func (s *Store) BulkFetchAppliedStockPrices(ctx context.Context, stockIDs []int6
 		if err != nil {
 			return nil, fmt.Errorf("parse applied stock price for stock %d: %w", stockID, err)
 		}
-		states[stockID] = AppliedStockPrice{StockID: stockID, Price: price, Timestamp: timestamp}
+		version := model.VersionFromWallClock(timestamp)
+		if raw := values["ver"]; raw != "" {
+			version, err = strconv.ParseInt(raw, 10, 64)
+			if err != nil {
+				return nil, fmt.Errorf("parse applied stock price version for stock %d: %w", stockID, err)
+			}
+		}
+		states[stockID] = AppliedStockPrice{StockID: stockID, Price: price, Timestamp: timestamp, Version: version}
 	}
 	return states, nil
 }
@@ -165,7 +175,7 @@ const commitStockPriceApplicationScript = `
 if redis.call('GET', KEYS[1]) ~= ARGV[1] then
     return 0
 end
-redis.call('HSET', KEYS[2], 'at', ARGV[2], 'price', ARGV[3])
+redis.call('HSET', KEYS[2], 'at', ARGV[2], 'price', ARGV[3], 'ver', ARGV[4])
 redis.call('DEL', KEYS[1])
 return 1
 `
@@ -188,6 +198,7 @@ func (l *StockPriceLockSet) Commit(ctx context.Context, applied []AppliedStockPr
 			lock.token,
 			state.Timestamp.UTC().Format(time.RFC3339Nano),
 			strconv.FormatInt(state.Price, 10),
+			strconv.FormatInt(state.Version, 10),
 		))
 		stockIDs = append(stockIDs, lock.stockID)
 	}

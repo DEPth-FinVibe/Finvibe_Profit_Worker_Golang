@@ -255,16 +255,17 @@ func (c *Consumers) handleStockMessages(ctx context.Context, msgs []message, eve
 			continue
 		}
 		switch {
-		case ev.UpdatedAt.After(current.UpdatedAt.Time):
+		case ev.Version() > current.Version():
 			c.metrics.RecordSkipped(eventType, metrics.ReasonStalePriceEvent)
 			latest[ev.StockID] = ev
-		case ev.UpdatedAt.Before(current.UpdatedAt.Time):
+		case ev.Version() < current.Version():
 			c.metrics.RecordSkipped(eventType, metrics.ReasonStalePriceEvent)
 		case ev.Price.Equal(current.Price.Decimal):
 			c.metrics.RecordSkipped(eventType, metrics.ReasonDuplicatePriceEvent)
 		default:
+			// 같은 버전에 다른 가격은 버전 없는 구 형식 이벤트가 같은 초에 겹칠 때만 생긴다.
 			c.metrics.RecordSkipped(eventType, metrics.ReasonPriceTimestampConflict)
-			slog.Warn("stock price timestamp conflict in batch", "event_type", eventType, "stock_id", ev.StockID, "updated_at", ev.UpdatedAt.Time)
+			slog.Warn("stock price version conflict in batch", "event_type", eventType, "stock_id", ev.StockID, "version", ev.Version())
 		}
 	}
 	c.metrics.RecordBatch(eventType, len(msgs), len(latest))
@@ -279,7 +280,7 @@ func (c *Consumers) handleStockMessages(ctx context.Context, msgs []message, eve
 			continue
 		}
 		c.metrics.RecordAge(eventType, time.Since(ev.UpdatedAt.Time))
-		reqs = append(reqs, model.ProfitCalculationRequest{StockID: ev.StockID, NewPrice: price, Timestamp: ev.UpdatedAt.Time})
+		reqs = append(reqs, model.ProfitCalculationRequest{StockID: ev.StockID, NewPrice: price, Timestamp: ev.UpdatedAt.Time, Version: ev.Version()})
 	}
 	outcome, err := c.profit.UpdateProfitsByStockPriceChanges(ctx, reqs)
 	if err != nil {

@@ -17,9 +17,30 @@ var Zero = decimal.Zero
 var utcLocation = time.UTC
 
 type StockPriceUpdatedEvent struct {
-	StockID   int64       `json:"stockId"`
-	Price     DecimalJSON `json:"price"`
-	UpdatedAt LocalTime   `json:"updatedAt"`
+	StockID      int64       `json:"stockId"`
+	Price        DecimalJSON `json:"price"`
+	UpdatedAt    LocalTime   `json:"updatedAt"`
+	PriceVersion int64       `json:"priceVersion"`
+}
+
+// Version은 모놀리식이 부여한 priceVersion이고, 없는 구 형식 이벤트는 체결시각으로 유도한다.
+func (e StockPriceUpdatedEvent) Version() int64 {
+	if e.PriceVersion > 0 {
+		return e.PriceVersion
+	}
+	return VersionFromWallClock(e.UpdatedAt.Time)
+}
+
+// 모놀리식은 updatedAt을 오프셋 없는 KST LocalDateTime으로 보내고, LocalTime은 이를 UTC로 읽는다.
+// 한국은 일광절약시간이 없어 고정 오프셋으로 충분하다.
+var marketLocation = time.FixedZone("KST", 9*60*60)
+
+// VersionFromWallClock은 priceVersion(체결 epoch 초 × 10^6 + 초 안 순번)의 순번 0 값을 유도한다.
+// t의 wall clock을 KST로 다시 읽는다. 그대로 epoch으로 바꾸면 모놀리식이 부여한 버전보다 9시간 앞서
+// 새 버전 이벤트가 모두 오래된 틱으로 버려진다.
+func VersionFromWallClock(t time.Time) int64 {
+	wall := time.Date(t.Year(), t.Month(), t.Day(), t.Hour(), t.Minute(), t.Second(), 0, marketLocation)
+	return wall.Unix() * 1_000_000
 }
 
 type PortfolioTradeEvent struct {
@@ -46,6 +67,15 @@ type ProfitCalculationRequest struct {
 	StockID   int64
 	NewPrice  int64
 	Timestamp time.Time
+	// Version이 0이면 Timestamp로 유도한다.
+	Version int64
+}
+
+func (r ProfitCalculationRequest) EffectiveVersion() int64 {
+	if r.Version > 0 {
+		return r.Version
+	}
+	return VersionFromWallClock(r.Timestamp)
 }
 
 type PortfolioTradeType string
