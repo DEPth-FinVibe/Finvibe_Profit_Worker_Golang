@@ -138,6 +138,7 @@ func TestPriceUpdateAppliesSameSecondTicksByVersion(t *testing.T) {
 	assertHash(t, mr, "pf:100", "cvp", "363")
 	assertHash(t, mr, "usr:7", "cvp", "363")
 	assertHash(t, mr, "stock:{10}:price-application", "ver", strconv.FormatInt(base+1, 10))
+	assertHash(t, mr, "pf:100", "sv:10", strconv.FormatInt(base+1, 10))
 
 	// 재시도로 뒤늦게 온 같은 초의 앞선 버전은 최신 반영을 덮지 못한다.
 	result, err = profit.UpdateProfitsByStockPriceChanges(ctx, []model.ProfitCalculationRequest{{StockID: 10, NewPrice: 120, Timestamp: tickAt, Version: base}})

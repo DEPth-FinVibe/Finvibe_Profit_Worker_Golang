@@ -157,7 +157,8 @@ type PortfolioTradeTotals struct {
 }
 
 // KEYS[1]=pf 해시, KEYS[2]=마커
-// ARGV: 1=마커 TTL, 2=pv 증감, 3=cvp 증감, 4=scv 필드, 5=scv 증감, 6=scv 기준값(호환 key), 7=scv 삭제, 8=0 이하면 scv 삭제, 9=ac 증감
+// ARGV: 1=마커 TTL, 2=pv 증감, 3=cvp 증감, 4=scv 필드, 5=scv 증감, 6=scv 기준값(호환 key), 7=scv 삭제, 8=0 이하면 scv 삭제, 9=ac 증감, 10=sv 필드
+// scv를 지울 때 sv도 함께 지운다. 증감분 반영만으로는 sv를 바꾸지 않는다.
 // 반환: 반영 후 scv(빈 문자열 = 없음)
 const applyPortfolioTradeTotalsScript = `
 if redis.call('EXISTS', KEYS[2]) == 1 then
@@ -171,14 +172,14 @@ if ARGV[3] ~= '0' then
 end
 local stock_value = ''
 if ARGV[7] == '1' then
-    redis.call('HDEL', KEYS[1], ARGV[4])
+    redis.call('HDEL', KEYS[1], ARGV[4], ARGV[10])
 else
     if not redis.call('HGET', KEYS[1], ARGV[4]) then
         redis.call('HSET', KEYS[1], ARGV[4], ARGV[6])
     end
     stock_value = redis.call('HINCRBYFLOAT', KEYS[1], ARGV[4], ARGV[5])
     if ARGV[8] == '1' and tonumber(stock_value) <= 0 then
-        redis.call('HDEL', KEYS[1], ARGV[4])
+        redis.call('HDEL', KEYS[1], ARGV[4], ARGV[10])
         stock_value = ''
     end
 end
@@ -209,6 +210,7 @@ func (s *Store) ApplyPortfolioTradeTotals(ctx context.Context, eventKey string, 
 		boolFlag(totals.RemoveStockCurrentValue),
 		boolFlag(totals.DeleteNonPositiveStockValue),
 		totals.AssetCount,
+		stockVersionField(stockID),
 	).Text()
 	s.observe("lua_apply_portfolio_trade_totals", err, start)
 	if err != nil {

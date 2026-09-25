@@ -60,7 +60,11 @@ func currentValueKey(portfolioID, stockID int64) string {
 	return fmt.Sprintf("portfolio:%d:stock:%d:current-value", portfolioID, stockID)
 }
 func stockCurrentValueField(stockID int64) string { return fmt.Sprintf("scv:%d", stockID) }
-func processedTradeKey(tradeID int64) string      { return fmt.Sprintf("processed:trade:%d", tradeID) }
+
+// stockVersionField는 scv:<id>를 마지막으로 교체한 가격 틱의 priceVersion이다.
+// 매매 증감분은 버전을 바꾸지 않으므로, 클라이언트는 이 버전 이후의 시세로 종목 평가액을 통째로 바꿀 수 있다.
+func stockVersionField(stockID int64) string { return fmt.Sprintf("sv:%d", stockID) }
+func processedTradeKey(tradeID int64) string { return fmt.Sprintf("processed:trade:%d", tradeID) }
 func (s *Store) StockCurrentValueKey(portfolioID, stockID int64) string {
 	return currentValueKey(portfolioID, stockID)
 }
@@ -164,6 +168,7 @@ type StockCurrentValueReplacement struct {
 	StockID       int64
 	PreviousValue decimal.Decimal
 	CurrentValue  decimal.Decimal
+	Version       int64
 }
 
 const replaceStockCurrentValuesScript = `
@@ -175,7 +180,7 @@ if not portfolio_current then
 end
 
 local total_delta = 0
-for i = 1, #ARGV, 3 do
+for i = 1, #ARGV, 5 do
     local field = ARGV[i]
     local new_value = ARGV[i + 1]
     local previous_value = redis.call('HGET', portfolio_key, field)
@@ -183,7 +188,7 @@ for i = 1, #ARGV, 3 do
         previous_value = ARGV[i + 2]
     end
     total_delta = total_delta + (tonumber(new_value) - tonumber(previous_value))
-    redis.call('HSET', portfolio_key, field, new_value)
+    redis.call('HSET', portfolio_key, field, new_value, ARGV[i + 3], ARGV[i + 4])
 end
 
 if total_delta ~= 0 then
@@ -211,12 +216,14 @@ func (s *Store) BulkReplaceStockCurrentValuesAndFetchMetadata(ctx context.Contex
 	start := time.Now()
 	for id, portfolioReplacements := range replacements {
 		ids = append(ids, id)
-		args := make([]any, 0, 3*len(portfolioReplacements))
+		args := make([]any, 0, 5*len(portfolioReplacements))
 		for _, replacement := range portfolioReplacements {
 			args = append(args,
 				stockCurrentValueField(replacement.StockID),
 				replacement.CurrentValue.String(),
 				replacement.PreviousValue.String(),
+				stockVersionField(replacement.StockID),
+				strconv.FormatInt(replacement.Version, 10),
 			)
 		}
 		cmds = append(cmds, pipe.Eval(ctx, replaceStockCurrentValuesScript, []string{pfKey(id)}, args...))

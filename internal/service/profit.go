@@ -25,7 +25,7 @@ func NewProfitService(s *redisstore.Store, m *metrics.Metrics, priceLockTTL time
 	return &ProfitService{store: s, metrics: m, priceLockTTL: priceLockTTL}
 }
 
-type recalcTask struct{ portfolioID, stockID, newPrice int64 }
+type recalcTask struct{ portfolioID, stockID, newPrice, version int64 }
 
 type PriceUpdateResult struct {
 	Applied int
@@ -165,9 +165,11 @@ func (s *ProfitService) renewPriceLocks(ctx context.Context, cancelApply context
 func (s *ProfitService) applyStockPriceChanges(ctx context.Context, reqs []model.ProfitCalculationRequest) error {
 	phase := time.Now()
 	priceByStock := make(map[int64]int64, len(reqs))
+	versionByStock := make(map[int64]int64, len(reqs))
 	stockIDs := make([]int64, 0, len(reqs))
 	for _, r := range reqs {
 		priceByStock[r.StockID] = r.NewPrice
+		versionByStock[r.StockID] = r.Version
 		stockIDs = append(stockIDs, r.StockID)
 	}
 	portfoliosByStock, err := s.store.BulkFindPortfolioIDsByStockIDs(ctx, stockIDs)
@@ -178,7 +180,7 @@ func (s *ProfitService) applyStockPriceChanges(ctx context.Context, reqs []model
 	tasks := make([]recalcTask, 0)
 	for _, stockID := range stockIDs {
 		for _, pf := range portfoliosByStock[stockID] {
-			tasks = append(tasks, recalcTask{pf, stockID, priceByStock[stockID]})
+			tasks = append(tasks, recalcTask{pf, stockID, priceByStock[stockID], versionByStock[stockID]})
 		}
 	}
 	if len(tasks) == 0 {
@@ -207,6 +209,7 @@ func (s *ProfitService) applyStockPriceChanges(ctx context.Context, reqs []model
 			StockID:       t.stockID,
 			PreviousValue: h.CurrentValue,
 			CurrentValue:  newCV,
+			Version:       t.version,
 		})
 		stockCV[s.store.StockCurrentValueKey(t.portfolioID, t.stockID)] = newCV
 	}
